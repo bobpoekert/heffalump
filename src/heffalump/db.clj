@@ -56,8 +56,6 @@
       (entity-fields v)
       (database db))))
 
-
-
 (defn create-cache
   []
   (->
