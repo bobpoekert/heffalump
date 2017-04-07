@@ -11,4 +11,6 @@
     [org.clojure/java.jdbc "0.7.0-alpha3"]
     [org.apache.derby/derby "10.13.1.1"]
     [com.google.guava/guava "21.0"]
+    [byte-streams "0.2.2"]
+    [org.clojure/data.fressian "0.2.1"]
 ])

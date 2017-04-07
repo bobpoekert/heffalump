@@ -5,7 +5,9 @@
       [heffalump.db :as db]))
 
 (defn- main
-  [config-fname & args]
-  (let [config (conf/load-config config-fname)
+  [& args]
+  (let [config (if (empty? args)
+                conf/default-config
+                (conf/load-config (first args)))
         db-val (db/init config)]
     (app/run! db-val config)))
