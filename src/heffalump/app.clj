@@ -40,7 +40,7 @@
       (cj/POST "/statuses/:id/reblog" (creates-status-reblog app-state))
       (cj/POST "/statuses/:id/unreblog" (deletes-status-reblog app-state))
       (cj/POST "/statuses/:id/favourite" (creates-fav app-state))
-      (cj/post "/statuses/:id/unfavourite" (deletes-fav app-state))
+      (cj/POST "/statuses/:id/unfavourite" (deletes-fav app-state))
       (cj/GET "/statuses/:id/context" (gets-thread app-state))
       (cj/GET "/statuses/:id/reblogged_by" (gets-reblogged-by app-state))
       (cj/GET "/statuses/:id/favourited_by" (gets-faved-by app-state))

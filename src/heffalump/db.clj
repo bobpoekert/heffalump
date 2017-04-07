@@ -2,10 +2,20 @@
   (import [com.google.common.cache CacheBuilder]
           [javax.crypto SecretKey SecretKeyFactory]
           [javax.crypto.spec PBEKeySpec]
-          [java.security SecureRandom])
-  (require [clojure.java.jdbc :as jdbc]
+          [java.security SecureRandom]
+          [org.mindrot.jbcrypt BCrypt])
+  (require [clojure.string :as s]
+           [clojure.java.jdbc :as jdbc]
            [clojure.data.fressian :as fress]
            [byte-streams :as bs]))
+
+(defn hash-password
+  [password-string]
+  (BCrypt/hashpw password-string (BCrypt/gensalt)))
+
+(defn check-password
+  [password-hash input]
+  (BCrypt/checkpw input password-hash))
 
 (defn create-table-if-not-exists-ddl
   "Given a table name and a vector of column specs, return the DDL string for
@@ -154,7 +164,10 @@ table-spec-str))))
 (defn put-dump!
   ([db k v] (put-dump! db nil k v))
   ([db entity k v]
-    (jdbc/insert! db :dump {:entity entity :key k :value v})))
+    (jdbc/insert! db :dump {
+      :entity entity
+      :key k
+      :value (fress/write v)})))
 
 (defn random-number
   [size]
@@ -162,23 +175,14 @@ table-spec-str))))
     (SecureRandom/getInstance "SHA1PRNG")
     (.generateSeed size)))
 
-(def b64encode
+(defn b64encode
   [ins]
   (let [encoder (java.util.Base64/getEncoder)]
     (.encodeToString encoder (bs/to-byte-array ins))))
 
-(defn hash-password
-  [^String password]
-  (let [salt (random-number 32)
-        key-factory (SecretKeyFactory/getInstance "PBKDF2WithHmacSHA1")
-        crypt
-          (.generateSecret key-factory
-            (PBEKeySpec.
-              (.toCharArray password)
-              salt
-              20000
-              256))]
-      (str (b64encode salt) "$" (b64encode crypt))))
+(defn new-auth-token
+  []
+  (b64encode (random-number 256)))
 
 (defn create-cache
   []

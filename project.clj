@@ -13,4 +13,5 @@
     [com.google.guava/guava "21.0"]
     [byte-streams "0.2.2"]
     [org.clojure/data.fressian "0.2.1"]
+    [org.mindrot/jbcrypt "0.4"]
 ])
