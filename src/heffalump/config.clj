@@ -9,7 +9,7 @@
       :db {
         :classname "org.apache.derby.jdbc.EmbeddedDriver"
         :subprotocol "derby"
-        :subbname (str data-dir "db.derby")
+        :subbname (str data-dir "/db.derby")
         :create true}
       :port 8000
       :hostname "heffalump.zone"}))

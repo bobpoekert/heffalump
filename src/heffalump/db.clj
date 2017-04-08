@@ -10,6 +10,8 @@
            [clojure.data.fressian :as fress]
            [byte-streams :as bs]))
 
+(set! *warn-on-reflection* true)
+
 (defn hash-password
   [password-string]
   (BCrypt/hashpw password-string (BCrypt/gensalt)))
@@ -17,25 +19,6 @@
 (defn check-password
   [password-hash input]
   (BCrypt/checkpw input password-hash))
-
-(defn db-meta
-  [db]
-  (.getMetaData (:conn db)))
-
-(defn db-tables
-  [db]
-  (into #{}
-    (map #(get % "TABLE_NAME")
-    (->
-      (db-meta db)
-      (.getTables nil nil nil (into-array String ["TABLE"]))
-      (jdbc/result-set-seq)))))
-
-(defn table-exists?
-  [db table-name]
-  (contains?
-    (db-tables db)
-    (jdbc/as-sql-name (name table-name))))
 
 (def id-column [:id :int "PRIMARY KEY" "GENERATED ALWAYS AS IDENTITY"])
 
@@ -63,6 +46,7 @@
         ;; reblogs_count is a thing in the API response but that doesn't belong in the DB
         ;; likewise favourites_count
         :application_id :int ; which Application posted this
+        :deleted_at :int
         ]]
     [:media_attributes
       [
@@ -78,7 +62,8 @@
         :status_id :int
         :sender_id :int
         :recipient_id :int
-        :created_at :int]]
+        :created_at :int
+        :deleted_at :int]]
     [:accounts
       [
       id-column
@@ -92,7 +77,13 @@
       ;; followers_count, following_count, and statuses_count can be computed
       :password_hash :text
       :auth_token :text
-      ]]])
+      :deleted_at :int
+      ]]
+    [:account_blocks
+      [
+        id-column
+        :blocker :int
+        :blockee :int]]])
    
 (def indexes
   [
@@ -100,7 +91,8 @@
     [:mentions :status_id]
     [:mentions :recipient_id]
     [:media_attributes :status_id]
-    [:statuses :thread_id]])
+    [:statuses :thread_id]
+    [:account_blocks :blocker]])
 
 (def fk-constraints
   [
@@ -114,12 +106,12 @@
     (jdbc/query (:conn db) (jdbc/create-table-ddl tablename columns))))
 
 (defn create-index!
-  [[table-name column-name]]
+  [db [table-name column-name]]
   (let [sql-table-name (jdbc/as-sql-name (name table-name))
         sql-column-name (jdbc/as-sql-name (name column-name))]
-    (jdbc/query
+    (jdbc/query db
       (format "create index %s on %s (%s)" 
-        (jdbc/as-sql-name (format "index_%s_%s" sql-table-name sql-column-nane))
+        (jdbc/as-sql-name (format "index_%s_%s" sql-table-name sql-column-name))
         sql-table-name
         sql-column-name))))
 
@@ -129,22 +121,22 @@
     (create-index! index)))
 
 (defn create-fk-constraint!
-  [[[left-table left-column] [right-table right-column]]]
+  [db [[left-table left-column] [right-table right-column]]]
   (let [sql-left-table (jdbc/as-sql-name (name left-table))
         sql-left-column (jdbc/as-sql-name (name left-column))
         sql-right-table (jdbc/as-sql-name (name right-table))
         sql-right-column (jdbc/as-sql-name (name right-column))]
-    (jdbc/query
+    (jdbc/query db
       (format "alter table %s add constraint if not exists fk_%s_%s_%s_%s (%s) references %s (%s)"
         sql-left-table
         sql-left-table sql-left-column sql-right-table sql-right-column
         sql-left-column
         sql-right-table sql-right-column))))
 
-(defn create-fk-constraints
-  [fks] 
+(defn create-fk-constraints!
+  [db fks] 
   (doseq [fk fks]
-    (create-fk-constraint! fk)))
+    (create-fk-constraint! db fk)))
 
 (defn get-dump
   ([db k] (get-dump db k nil))
@@ -183,16 +175,17 @@
   []
   (->
     (CacheBuilder/newBuilder)
-    (.softValues)))
+    (.softValues)
+    (.build)
+    (.asMap)))
 
 (defn setup-db!
   [db]
-  (jdbc/with-connection (:conn db)
-    (jdbc/transaction
-      (create-tables! tables)
-      (create-indexes! indexes)
-      (create-fk-contraints! fk-constraints)
-      (jdbc/execute! (:conn db) "create sequence thread_id_sequence"))))
+  (jdbc/with-db-transaction [txn (:conn db)]
+    (create-tables! txn table-specs)
+    (create-indexes! txn indexes)
+    (create-fk-constraints! txn fk-constraints)
+    (jdbc/execute! txn "create sequence thread_id_sequence")))
 
 (defn init!
   [config]
@@ -205,13 +198,28 @@
       (setup-db! res))
     res))
 
+(defn put!
+  [^java.util.Map m k v]
+  (.put m k v))
+
+(defmacro cached
+  [db cache-key value-generator]
+  `(let [cache-key# ~cache-key
+         cache-value# (get (:cache ~db) cache-key#)]
+    (if cache-value#
+      cache-value#
+      (let [result# ~value-generator]
+        (put! (:cache ~db) cache-key# cache-value#)
+        cache-value#))))
+
 (defn get-by-id
   [db table id]
-  (jdbc/query db ["select * from ? where id = ? limit 1" (name table) id] {:result-set-fn first}))
+  (cached db [:by-id table id]  
+    (jdbc/query (:conn db) ["select * from ? where id = ? limit 1" (name table) id] {:result-set-fn first})))
 
 (defn create-local-account!
   [db & {:keys [username password]}]
-  (let [ph (password-hash password)
+  (let [ph (hash-password password)
         auth-token (new-auth-token)]
     (jdbc/insert! (:conn db)
       {
@@ -225,7 +233,7 @@
 
 (defn create-status!
   [db & {:keys [uri url account_id in_reply_to_id reblog content application_id]
-         :else {application_id nil reblog nil in_reply_to_id nil}}]
+         :else {:application_id nil :reblog nil :in_reply_to_id nil}}]
   (jdbc/with-db-transaction [tc (:conn db)]
     (let [reply-target (if in_reply_to_id (get-by-id tc :statuses in_reply_to_id))
           thread_id (if reply-target
@@ -246,10 +254,15 @@
 
 (defn get-thread
   [db status-id]
-  (let [ids (jdbc/query
-              [#=(str
-                  "select id from statuses where thread_id in ("
-                    "select thread_id from statuses where id = ? limit 1"
-                  ") order by thread_depth")
-               status-id])]
-    (vec ids)))
+  (let [thread-id (:thread_id (get-by-id db :statuses status-id))]
+    (jdbc/query db
+      ["select id from statuses where thread_id = ? order by thread_depth" thread-id])))
+
+(defn token-user
+  [db auth-token]
+  (cached db [:auth-token-account auth-token]
+    (let [account-id (jdbc/query (:conn db) ["select id from accounts where auth_token = ? limit 1" auth-token] {:result-set-fn first})]
+      ;; doing it this way so that both cache keys refer to the same object in memory
+      (get-by-id db :accounts account-id))))
+
+
