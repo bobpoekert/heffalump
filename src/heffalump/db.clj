@@ -5,6 +5,7 @@
           [java.security SecureRandom]
           [org.mindrot.jbcrypt BCrypt])
   (require [clojure.string :as s]
+           [clojure.java.io :as io]
            [clojure.java.jdbc :as jdbc]
            [clojure.data.fressian :as fress]
            [byte-streams :as bs]))
@@ -17,35 +18,24 @@
   [password-hash input]
   (BCrypt/checkpw input password-hash))
 
-(defn create-table-if-not-exists-ddl
-  "Given a table name and a vector of column specs, return the DDL string for
-  creating that table. Each column spec is, in turn, a vector of keywords or
-  strings that is converted to strings and concatenated with spaces to form
-  a single column description in DDL, e.g.,
-    [:cost :int \"not null\"]
-    [:name \"varchar(32)\"]
-  The first element of a column spec is treated as a SQL entity (so if you
-  provide the :entities option, that will be used to transform it). The
-  remaining elements are left as-is when converting them to strings.
-  An options map may be provided that can contain:
-  :table-spec -- a string that is appended to the DDL -- and/or
-  :entities -- a function to specify how column names are transformed."
-  ([table specs] (create-table-ddl table specs {}))
-  ([table specs opts]
-   (let [table-spec     (:table-spec opts)
-         entities       (:entities   opts identity)
-         table-spec-str (or (and table-spec (str " " table-spec)) "")
-         spec-to-string (fn [spec]
-                          (try
-                            (str/join " " (cons (jdbc/as-sql-name entities (first spec))
-                                                (map name (rest spec))))
-                            (catch Exception _
-                              (throw (IllegalArgumentException.
-                                      "column spec is not a sequence of keywords / strings")))))]
-     (format "CREATE TABLE IF NOT EXISTS %s (%s)%s"
-             (jdbc/as-sql-name entities table)
-             (str/join ", " (map jdbc/spec-to-string specs))
-table-spec-str))))
+(defn db-meta
+  [db]
+  (.getMetaData (:conn db)))
+
+(defn db-tables
+  [db]
+  (into #{}
+    (map #(get % "TABLE_NAME")
+    (->
+      (db-meta db)
+      (.getTables nil nil nil (into-array String ["TABLE"]))
+      (jdbc/result-set-seq)))))
+
+(defn table-exists?
+  [db table-name]
+  (contains?
+    (db-tables db)
+    (jdbc/as-sql-name (name table-name))))
 
 (def id-column [:id :int "PRIMARY KEY" "GENERATED ALWAYS AS IDENTITY"])
 
@@ -63,6 +53,10 @@ table-spec-str))))
         :url :text ;URL to the status page (can be remote)
         :account_id :int ; Account FK
         :in_reply_to_id :int ; null or ID of status it replies to
+        ;; on status insert, if the status is in_reply_to another status,
+        ;; this status has the same thread id. otherwise, thread_id = id
+        :thread_id :int
+        :thread_depth :int
         :reblog :int ; null or status
         :content :text ; Body of the status. Contains HTML
         :created_at :int ; UTC epoch timestamp of when this status was created
@@ -105,7 +99,8 @@ table-spec-str))))
     [:accounts :auth_token]
     [:mentions :status_id]
     [:mentions :recipient_id]
-    [:media_attributes :status_id]])
+    [:media_attributes :status_id]
+    [:statuses :thread_id]])
 
 (def fk-constraints
   [
@@ -114,16 +109,16 @@ table-spec-str))))
     [[:statuses :account_id] [:accounts :id]]])
 
 (defn create-tables!
-  [tables]
+  [db tables]
   (doseq [[tablename columns] tables]
-    (jdbc/query (create-table-if-not-exists-ddl tablename columns))))
+    (jdbc/query (:conn db) (jdbc/create-table-ddl tablename columns))))
 
 (defn create-index!
   [[table-name column-name]]
   (let [sql-table-name (jdbc/as-sql-name (name table-name))
         sql-column-name (jdbc/as-sql-name (name column-name))]
     (jdbc/query
-      (format "create index %s if not exists on %s (%s)" 
+      (format "create index %s on %s (%s)" 
         (jdbc/as-sql-name (format "index_%s_%s" sql-table-name sql-column-nane))
         sql-table-name
         sql-column-name))))
@@ -140,7 +135,7 @@ table-spec-str))))
         sql-right-table (jdbc/as-sql-name (name right-table))
         sql-right-column (jdbc/as-sql-name (name right-column))]
     (jdbc/query
-      (format "alter table %s add constraint fk_%s_%s_%s_%s (%s) references %s (%s)"
+      (format "alter table %s add constraint if not exists fk_%s_%s_%s_%s (%s) references %s (%s)"
         sql-left-table
         sql-left-table sql-left-column sql-right-table sql-right-column
         sql-left-column
@@ -190,16 +185,61 @@ table-spec-str))))
     (CacheBuilder/newBuilder)
     (.softValues)))
 
-(defn setup-db
+(defn setup-db!
   [db]
   (jdbc/with-connection (:conn db)
     (jdbc/transaction
       (create-tables! tables)
       (create-indexes! indexes)
-      (create-fk-contraints! fk-constraints))))
+      (create-fk-contraints! fk-constraints)
+      (jdbc/execute! (:conn db) "create sequence thread_id_sequence"))))
 
-(defn init
+(defn init!
   [config]
-  (let [conn (:db config)]
-    {:conn conn
-     :cache (create-cache)}))
+  (let [fname (:subname (:db config))
+        exists (.exists (io/file fname))
+        conn (jdbc/get-connection (:db config))
+        res {:conn conn
+             :cache (create-cache)}]
+    (if-not exists
+      (setup-db! res))
+    res))
+
+(defn get-by-id
+  [db table id]
+  (jdbc/query db ["select * from ? where id = ? limit 1" (name table) id] {:result-set-fn first}))
+
+(defn create-local-account!
+  [db & {:keys [username password]}]
+  (let [ph (password-hash password)
+        auth-token (new-auth-token)]
+    (jdbc/insert! (:conn db)
+      {
+        :username username
+        :password_hash ph
+        :auth_token auth-token})))
+
+(defn new-thread-id!
+  [db]
+  (jdbc/query db "select next value for thread_id_sequence" {:result-set-fn first}))
+
+(defn create-status!
+  [db & {:keys [uri url account_id in_reply_to_id reblog content application_id]
+         :else {application_id nil reblog nil in_reply_to_id nil}}]
+  (jdbc/with-db-transaction [tc (:conn db)]
+    (let [reply-target (if in_reply_to_id (get-by-id tc :statuses in_reply_to_id))
+          thread_id (if reply-target
+                      (:thread_id reply-target)
+                      (new-thread-id! tc))
+          thread_depth (if reply-target (inc (:thread_depth reply-target)) 0)]
+      (jdbc/create! 
+
+(defn get-thread
+  [db status-id]
+  (let [ids (jdbc/query
+              [#=(str
+                  "select id from statuses where thread_id in ("
+                    "select thread_id from statuses where id = ? limit 1"
+                  ") order by thread_depth")
+               status-id])]
+    (vec ids)))
