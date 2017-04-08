@@ -232,7 +232,17 @@
                       (:thread_id reply-target)
                       (new-thread-id! tc))
           thread_depth (if reply-target (inc (:thread_depth reply-target)) 0)]
-      (jdbc/create! 
+      (jdbc/insert! tc :statuses
+        {
+          :uri uri
+          :url url
+          :account_id account_id
+          :in_reply_to_id in_reply_to_id
+          :thread_id thread_id
+          :thread_depth thread_depth
+          :reblog reblog
+          :content content
+          :application_id application_id}))))
 
 (defn get-thread
   [db status-id]
