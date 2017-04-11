@@ -128,8 +128,8 @@
     (create-tables! txn table-specs)
     (create-indexes! txn indexes)
     ;(create-fk-constraints! txn fk-constraints)
-    (jdbc/execute! txn "create sequence thread_id_sequence")
-    (jdbc/execute! txn "create sequence clock_sequence")))
+    (jdbc/execute! txn "create sequence thread_id_sequence start with 0")
+    (jdbc/execute! txn "create sequence clock_sequence start with 0")))
 
 (defn init!
   [config]

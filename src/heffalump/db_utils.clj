@@ -143,7 +143,7 @@
 (defn prepared-query-generator
   [query-name query]
   (fn [db]
-    (println query)
+    ;;(println query)
     {query-name (jdbc/prepare-statement (:connection db) query)})) 
 
 (defn- defquery-fn

@@ -29,8 +29,7 @@
     (with-open [^java.sql.Connection dbc# (:connection ~dbname)]
       ~@body)))
 
-(testing "db init"
+(testing "db thread id sequence"
   (with-test-db db
-    (is (= 0 (with-test-db db
-              (d/new-thread-id db)
-              (d/new-thread-id db))))))
+    (is (= (d/new-thread-id db) 0))
+    (is (= (d/new-thread-id db) 1))))
