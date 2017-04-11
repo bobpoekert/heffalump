@@ -61,7 +61,6 @@
             sql-left-table sql-left-column sql-right-table sql-right-column
             sql-left-column
             sql-right-table sql-right-column)]
-    (println query)
     (jdbc/execute! db query)))
 
 (defn create-fk-constraints!
@@ -71,7 +70,7 @@
 
 (defn query-one
   [db query]
-  (jdbc/query @db query {:result-set-fn first}))
+  (jdbc/query db query {:result-set-fn first}))
 
 (defn random-number
   [size]
@@ -122,13 +121,45 @@
   [db tablename]
   (let [conn (:connection db)
         sql-string (format "select * from %s where id = ?" (name tablename))
-        _ (println sql-string)
         statement (jdbc/prepare-statement conn sql-string)]
     {tablename statement}))
 
 (defn get-by-id-query
   [db tablename]
   (get (:by-id-queries db) tablename)) 
+
+(defn table-spec-has-id?
+  [specs]
+  (not (nil? (some #(= (name (first %)) "id") specs))))
+
+(defn generate-insert-query
+  [db [tablename specs]]
+  (let [col-names (for [col specs] (name (first col)))]
+    {tablename
+      (jdbc/prepare-statement (:connection db)
+        (format "INSERT INTO %s (%s) VALUES (%s)"
+          (name tablename)
+          (s/join ", " col-names)
+          (s/join ", " (repeat (count col-names) "?"))))}))
+                                  
+(defn insert-row!
+  [db tablename row]
+  (let [cols (map first (get (:tables db) tablename))
+        ^java.sql.PreparedStatement query (get (:insert-queries db) tablename)
+        values (for [col cols] (get row col))]
+    (loop [[col & rst] values
+           idx 1]
+      (.setObject query idx col)
+      (if-not (nil? rst)
+        (recur rst (inc idx))))
+    (.executeUpdate query) 
+    (with-open [^java.sql.ResultSet rs (.getGeneratedKeys query)]
+      (let [^java.sql.ResultSetMetaData mm (.getMetaData rs)
+            n-cols (.getColumnCount mm)
+            ^int id-col (some (fn [^long idx] (= (.getColumnName mm idx) "id")) (range n-cols))]
+        (if id-col
+          (assoc row :id (.getLong rs id-col))
+          row)))))
 
 (defn get-by-id
   [db table id]
@@ -146,12 +177,15 @@
 
 (defn populate-queries
   [db tables]
-  (assoc db
+  (merge db {
+     :tables tables
      :by-id-queries (reduce merge
                       (for [[tablename specs] tables]
-                        (if (some #(= (name (first %)) "id") specs)
+                        (if (table-spec-has-id? specs) 
                           (generate-by-id-query db tablename)
-                          {})))))
+                          {})))
+    :insert-queries (reduce merge (map (partial generate-insert-query db) tables))}))
+                        
 
 (defn create-db
   [config]

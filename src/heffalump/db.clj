@@ -125,15 +125,10 @@
 
 (defn setup-db!
   [db]
-  (println "setting up db")
   (jdbc/with-db-transaction [txn db]
-    (println "create tables")
     (create-tables! txn table-specs)
-    (println "create indexes")
     (create-indexes! txn indexes)
-    ;(println "craete constraints")
     ;(create-fk-constraints! txn fk-constraints)
-    (println "create sequence")
     (jdbc/execute! txn "create sequence thread_id_sequence")
     (jdbc/execute! txn "create sequence clock_sequence")))
 
@@ -143,7 +138,6 @@
     (thread-local
       (let [db (create-db config)
             pathname (:subname (:db config))]
-        (println pathname)
         (when (and (not @db-setup?)
                    (:init-db config)
                    (or (.startsWith ^String pathname "memory:")
@@ -166,7 +160,7 @@
 
 (defn new-thread-id!
   [db]
-  (query-one db "select next value for thread_id_sequence"))
+  (query-one @db "select next value for thread_id_sequence"))
 
 (defn create-status!
   [db & {:keys [uri url account_id in_reply_to_id reblog content application_id]
