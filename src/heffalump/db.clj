@@ -12,7 +12,6 @@
            [clojure.data.fressian :as fress]
            [byte-streams :as bs]))
 
-
 (def id-column [:id :int "PRIMARY KEY" "GENERATED ALWAYS AS IDENTITY"])
 
 (def table-specs
@@ -100,21 +99,21 @@
     [[:mentions :status_id] [:statuses :id]]
     [[:statuses :account_id] [:accounts :id]]])
 
+(defquery get-dump-query
+  [k entity]
+  "select v from dump where k = ? and entity = ?")
 
 (defn get-dump
   ([db k] (get-dump db k nil))
   ([db k entity]
-    (let [result (jdbc/query db 
-                  ["select v from dump where k = ? and entity = ? limit 1"
-                    k entity])
-          result-string (first result)]
+    (let [result-string (:v (get-dump-query db first k entity))]
       (if result-string
         (fress/read (bs/convert result-string java.io.Reader))))))
 
 (defn put-dump!
   ([db k v] (put-dump! db nil k v))
   ([db entity k v]
-    (jdbc/insert! db :dump {
+    (insert-row! db :dump {
       :entity entity
       :k k
       :v (fress/write v)})))
@@ -134,7 +133,8 @@
 
 (defn init!
   [config]
-  (let [db-setup? (atom false)] 
+  (let [db-setup? (atom false)
+        cache (create-cache)]
     (thread-local
       (let [db (create-db config)
             pathname (:subname (:db config))]
@@ -144,59 +144,67 @@
                        (not (.exists (io/file pathname)))))
           (setup-db! db)
           (swap! db-setup? (fn [v] true)))
-        (populate-queries db table-specs)))))
-
+        (assoc
+          (populate-queries db table-specs)
+          :cache cache)))))
 
 (defn create-local-account!
   [db & {:keys [username password]}]
-  (let [db @db
-        ph (hash-password password)
+  (let [ph (hash-password password)
         auth-token (new-auth-token)]
-    (jdbc/insert! db :accounts
+    (insert-row! db :accounts
       {
         :username username
         :password_hash ph
         :auth_token auth-token})))
 
-(defn new-thread-id!
-  [db]
-  (query-one @db "select next value for thread_id_sequence"))
+(defquery new-thread-id
+  []
+  "VALUES NEXT VALUE FOR thread_id_sequence"
+  #(:1 (first %)))
 
 (defn create-status!
   [db & {:keys [uri url account_id in_reply_to_id reblog content application_id]
          :else {:application_id nil :reblog nil :in_reply_to_id nil}}]
-  (let [db @db]
-    (jdbc/with-db-transaction [tc db]
-      (let [reply-target (if in_reply_to_id (get-by-id tc :statuses in_reply_to_id))
-            thread_id (if reply-target
-                        (:thread_id reply-target)
-                        (new-thread-id! tc))
-            thread_depth (if reply-target (inc (:thread_depth reply-target)) 0)]
-        (jdbc/insert! tc :statuses
-          {
-            :uri uri
-            :url url
-            :account_id account_id
-            :in_reply_to_id in_reply_to_id
-            :thread_id thread_id
-            :thread_depth thread_depth
-            :reblog reblog
-            :content content
-            :application_id application_id})))))
+  (jdbc/with-db-transaction [tc db]
+    (let [reply-target (if in_reply_to_id (get-by-id tc :statuses in_reply_to_id))
+          thread_id (if reply-target
+                      (:thread_id reply-target)
+                      (new-thread-id! tc))
+          thread_depth (if reply-target (inc (:thread_depth reply-target)) 0)]
+      (insert-row! tc :statuses
+        {
+          :uri uri
+          :url url
+          :account_id account_id
+          :in_reply_to_id in_reply_to_id
+          :thread_id thread_id
+          :thread_depth thread_depth
+          :reblog reblog
+          :content content
+          :application_id application_id}))))
+
+(defquery get-id-by-thread-id
+  [thread-id]
+  "select id from statuses where thread_id = ? order by thread_depth")
 
 (defn get-thread
   [db status-id]
-  (let [db @db
-        thread-id (:thread_id (get-by-id db :statuses status-id))]
-    (jdbc/query db
-      ["select id from statuses where thread_id = ? order by thread_depth" thread-id])))
+  (get-id-by-thread-id db first (:thread_id (get-by-id db :statuses status-id))))
+
+(defquery get-id-by-auth-token-query
+  [auth-token]
+  "select id from accounts where auth_token = ?")
+
+(defn get-id-by-auth-token
+  [db auth-token]
+  (cached db [:auth-token-id auth-token]
+    (get-id-by-auth-token-query db first auth-token))) 
 
 (defn token-user
   [db auth-token]
-  (let [db @db]
-    (cached db [:auth-token-account auth-token]
-      (let [account-id (query-one db ["select id from accounts where auth_token = ? limit 1" auth-token])]
-        ;; doing it this way so that both cache keys refer to the same object in memory
-        (get-by-id db :accounts account-id)))))
+  (if-let [account-id (get-id-by-auth-token db auth-token)]
+    ;; doing it this way so that both cache keys refer to the same object in memory
+    (get-by-id db :accounts account-id)))
 
 

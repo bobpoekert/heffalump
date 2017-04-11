@@ -6,13 +6,14 @@
            [heffalump.db :as d]
            [heffalump.db-utils :as du]))
 
-(def test-config
+(defn test-config
+  []
   {
     :data-dir nil
     :db {
       :classname "org.apache.derby.jdbc.EmbeddedDriver"
       :subprotocol "derby"
-      :subname (str "memory:" (du/b64encode (du/random-number 8)))
+      :subname (str "memory:" (du/b64encode (du/random-number 16)))
       :create true}
     :init-db true
     :port 8000
@@ -20,7 +21,7 @@
 
 (defn new-test-db
   []
-  (d/init! test-config))
+  (d/init! (test-config)))
 
 (defmacro with-test-db
   [dbname & body]
@@ -30,4 +31,6 @@
 
 (testing "db init"
   (with-test-db db
-    (du/get-by-id db :accounts 0)))
+    (is (= 0 (with-test-db db
+              (d/new-thread-id db)
+              (d/new-thread-id db))))))

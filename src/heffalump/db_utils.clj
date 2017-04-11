@@ -11,6 +11,21 @@
            [clojure.data.fressian :as fress]
            [byte-streams :as bs]))
 
+(defprotocol MaybeDeref
+  (maybe-deref [v]))
+
+(extend-protocol MaybeDeref
+  clojure.lang.IDeref
+  (maybe-deref [v] (deref v))
+  Object
+  (maybe-deref [v] v))
+
+(def db-create-actions (atom []))
+
+(defn on-db-create!
+  [thunk]
+  (swap! db-create-actions (fn [old] (conj old thunk))))
+
 (defn make-thread-local
   [generator]
   (ThreadLocalThing. ::initial-val generator))
@@ -94,7 +109,7 @@
 (defmacro cached
   [db cache-key value-generator]
   `(let [cache-key# ~cache-key
-         ^java.util.Map cache# (:cache ~db)
+         ^java.util.Map cache# (:cache (maybe-deref ~db))
          cache-value# (get cache# cache-key#)]
     (if cache-value#
       cache-value#
@@ -105,11 +120,12 @@
 
 (defn statement-set-params!
   [^java.sql.PreparedStatement stmt params]
-  (loop [[param & rst] params
-         idx 1]
-    (.setObject stmt idx (jdbc/sql-value param))
-    (if rst
-      (recur rst (inc idx)))))
+  (if (seq params)
+    (loop [[param & rst] params
+           idx 1]
+      (.setObject stmt idx (jdbc/sql-value param))
+      (if rst
+        (recur rst (inc idx))))))
 
 (defn run-prepared-query
   [db ^java.sql.PreparedStatement stmt args result-set-fn]
@@ -123,6 +139,32 @@
         sql-string (format "select * from %s where id = ?" (name tablename))
         statement (jdbc/prepare-statement conn sql-string)]
     {tablename statement}))
+
+(defn prepared-query-generator
+  [query-name query]
+  (fn [db]
+    (println query)
+    {query-name (jdbc/prepare-statement (:connection db) query)})) 
+
+(defn- defquery-fn
+  ([query-name args query] (defquery-fn query-name args query 'doall))
+  ([query-name args query result-fn]
+    (let [db-sym (gensym "db")
+          result-fn-sym (gensym "result-set-fn")
+          name-kw (keyword query-name)]
+     `(do 
+        (on-db-create! (prepared-query-generator ~name-kw ~query))
+        (defn ~query-name
+          (~(vec (concat [db-sym result-fn-sym] args))
+            (let [db# (maybe-deref ~db-sym)
+                  q# (get db# ~name-kw)]
+              (run-prepared-query db# q# ~args ~result-fn-sym)))
+          (~(vec (concat [db-sym] args))
+            ~(concat (list query-name db-sym result-fn) args)))))))
+
+(defmacro defquery
+  [& args]
+  (apply defquery-fn args))
 
 (defn get-by-id-query
   [db tablename]
@@ -144,7 +186,8 @@
                                   
 (defn insert-row!
   [db tablename row]
-  (let [cols (map first (get (:tables db) tablename))
+  (let [db (maybe-deref db)
+        cols (map first (get (:tables db) tablename))
         ^java.sql.PreparedStatement query (get (:insert-queries db) tablename)
         values (for [col cols] (get row col))]
     (loop [[col & rst] values
@@ -164,12 +207,14 @@
 (defn get-by-id
   [db table id]
   (cached db [:by-id table id]  
-    (let [by-id-query (get-by-id-query db table)]
+    (let [db (maybe-deref db)
+          by-id-query (get-by-id-query db table)]
       (run-prepared-query db by-id-query [id] first))))
 
 (defn update-row!
   [db table-name row]
-  (let [id (:id row)
+  (let [db (maybe-deref db)
+        id (:id row)
         where-clause ["id = ?" id]
         res (jdbc/update! db table-name row where-clause)]
     (.remove ^java.util.Map (:cache db) [:by-id table-name id])
@@ -177,19 +222,18 @@
 
 (defn populate-queries
   [db tables]
-  (merge db {
-     :tables tables
-     :by-id-queries (reduce merge
-                      (for [[tablename specs] tables]
-                        (if (table-spec-has-id? specs) 
-                          (generate-by-id-query db tablename)
-                          {})))
-    :insert-queries (reduce merge (map (partial generate-insert-query db) tables))}))
+  (reduce (fn [coll thunk] (merge coll (thunk db)))
+    (merge db {
+       :tables tables
+       :by-id-queries (reduce merge
+                        (for [[tablename specs] tables]
+                          (if (table-spec-has-id? specs) 
+                            (generate-by-id-query db tablename)
+                            {})))
+      :insert-queries (reduce merge (map (partial generate-insert-query db) tables))})
+    @db-create-actions))
                         
-
 (defn create-db
   [config]
-  (let [cache (create-cache)]
-    {:cache cache
-     :connection (jdbc/get-connection (:db config))}))
+    {:connection (jdbc/get-connection (:db config))})
     
