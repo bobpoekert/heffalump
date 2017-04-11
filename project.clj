@@ -2,6 +2,7 @@
   :description "A federated social networking server"
   :license {:name "MIT License"
             :url "https://github.com/bobpoekert/heffalump/blob/master/LICENSE"}
+  :java-source-paths ["src/java"]
   :dependencies [
     [org.clojure/clojure "1.8.0"]
     [aleph "0.4.3"]
@@ -14,4 +15,5 @@
     [byte-streams "0.2.2"]
     [org.clojure/data.fressian "0.2.1"]
     [org.mindrot/jbcrypt "0.4"]
+    [org.clojure/test.check "0.9.0"]
 ])

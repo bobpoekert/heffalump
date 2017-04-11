@@ -1,6 +1,5 @@
 (ns heffalump.config
-  (require [clojure.java.io :as io])
-  (use korma.db))
+  (require [clojure.java.io :as io]))
 
 (def default-config
   (let [data-dir "~/.heffalump"]
@@ -11,6 +10,7 @@
         :subprotocol "derby"
         :subbname (str data-dir "/db.derby")
         :create true}
+      :init-db true
       :port 8000
       :hostname "heffalump.zone"}))
 
