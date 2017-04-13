@@ -11,6 +11,8 @@
            [clojure.data.fressian :as fress]
            [byte-streams :as bs]))
 
+(set! *warn-on-reflection* true)
+
 (defprotocol MaybeDeref
   (maybe-deref [v]))
 
@@ -42,11 +44,18 @@
   [password-hash input]
   (BCrypt/checkpw input password-hash))
 
+(defn prepare-statement
+  [db sql-string & args]
+  (try
+    (apply jdbc/prepare-statement (:connection db) sql-string args)
+    (catch Exception e
+      (throw (RuntimeException. (format "exception compiling \"%s\": %s" sql-string (str e)))))))
+
 (defn create-tables!
   [db tables]
   (doseq [[tablename columns] tables]
     (let [columns (for [[l r] columns] [l (if (= r :text) "VARCHAR(4096)" r)])
-          query (jdbc/create-table-ddl tablename columns)]
+          query (format "CREATE TABLE %s (%s)" (name tablename) (s/join ", " (map #(s/join " " (map name %)) columns)))]
       (jdbc/execute! db query))))
 
 (defn create-index!
@@ -83,10 +92,6 @@
   (doseq [fk fks]
     (create-fk-constraint! db fk)))
 
-(defn query-one
-  [db query]
-  (jdbc/query db query {:result-set-fn first}))
-
 (defn random-number
   [size]
   (->
@@ -115,8 +120,8 @@
       cache-value#
       (let [result# ~value-generator]
         (if-not (nil? result#)
-          (.put cache# cache-key# cache-value#))
-        cache-value#))))
+          (.put cache# cache-key# result#)
+        result#)))))
 
 (defn statement-set-params!
   [^java.sql.PreparedStatement stmt params]
@@ -131,40 +136,71 @@
   [db ^java.sql.PreparedStatement stmt args result-set-fn]
   (statement-set-params! stmt args)
   (with-open [results (.executeQuery stmt)]
-    (result-set-fn (jdbc/result-set-seq results)))) 
+    (result-set-fn results))) 
 
 (defn generate-by-id-query
-  [db tablename]
-  (let [conn (:connection db)
-        sql-string (format "select * from %s where id = ?" (name tablename))
-        statement (jdbc/prepare-statement conn sql-string)]
-    {tablename statement}))
+  [db tablename col-specs]
+  (let [col-names (for [col col-specs] (name (first col)))
+        sql-string (format "select %s from %s where id = ?" (s/join ", " col-names) (name tablename))
+        statement (prepare-statement db sql-string)
+        typename (format "full-row-%s" (name tablename))
+        type-constructor-sym (symbol (format "%s." typename))
+        rs-sym (with-meta (gensym "rs") {:tag "java.sql.ResultSet"})
+        row-reader (eval `(do
+                                  (defrecord ~(symbol typename) ~(mapv symbol col-names))
+                                  (fn [~rs-sym]
+                                    ~(cons type-constructor-sym
+                                      (for [idx (range (count col-names))] `(.getObject ~rs-sym ~(inc idx)))))))]
+    {tablename [statement row-reader]}))
 
 (defn prepared-query-generator
   [query-name query]
   (fn [db]
-    ;;(println query)
-    {query-name (jdbc/prepare-statement (:connection db) query)})) 
+    {query-name (prepare-statement db query)})) 
+
+(defn- gen-result-set-unpacker
+  [return-keys record-sym]
+  (let [rs (with-meta (gensym "rs") {:tag "java.sql.ResultSet"})]
+    `(fn [seq-consumer#]
+      (fn [~rs]
+        (seq-consumer#
+          (
+            (fn seqer# []
+              (when (.next ~rs)
+                (cons
+                  ~(cons
+                      (symbol (format "->%s" (name record-sym)))
+                      (for [idx (range (count return-keys))]
+                       `(.getObject ~rs ~(inc idx))))
+                  (lazy-seq (seqer#)))))))))))
 
 (defn- defquery-fn
-  ([query-name args query] (defquery-fn query-name args query 'doall))
-  ([query-name args query result-fn]
+  ([query-name args return-keys query] (defquery-fn query-name args return-keys query 'doall))
+  ([query-name args return-keys query result-fn]
     (let [db-sym (gensym "db")
           result-fn-sym (gensym "result-set-fn")
-          name-kw (keyword query-name)]
-     `(do 
+          name-kw (keyword query-name)
+          record-name (gensym (name query-name))]
+     `(do
+        (defrecord ~record-name ~(mapv #(symbol (name %)) return-keys))
         (on-db-create! (prepared-query-generator ~name-kw ~query))
-        (defn ~query-name
-          (~(vec (concat [db-sym result-fn-sym] args))
-            (let [db# (maybe-deref ~db-sym)
-                  q# (get db# ~name-kw)]
-              (run-prepared-query db# q# ~args ~result-fn-sym)))
-          (~(vec (concat [db-sym] args))
-            ~(concat (list query-name db-sym result-fn) args)))))))
+        (let [result-set-unpacker# ~(gen-result-set-unpacker return-keys record-name)] 
+          (defn ~query-name
+            (~(vec (concat [db-sym result-fn-sym] args))
+              (let [db# (maybe-deref ~db-sym)
+                    q# (get db# ~name-kw)]
+                (run-prepared-query db# q# ~args (result-set-unpacker# ~result-fn-sym))))
+            (~(vec (concat [db-sym] args))
+              ~(concat (list query-name db-sym result-fn) args))))))))
 
 (defmacro defquery
   [& args]
   (apply defquery-fn args))
+
+(defquery last-row-id
+  [] [:id]
+  "VALUES identity_val_local()"
+  #(:id (first %)))
 
 (defn get-by-id-query
   [db tablename]
@@ -176,40 +212,56 @@
 
 (defn generate-insert-query
   [db [tablename specs]]
-  (let [col-names (for [col specs] (name (first col)))]
-    {tablename
-      (jdbc/prepare-statement (:connection db)
+  (let [cols (for [col specs] (first col))
+        has-id-col (boolean (some #(= % :id) cols))
+        cols (filter #(not (= % :id)) cols)
+        col-names (map name cols)]
+    {tablename [
+      (prepare-statement db 
         (format "INSERT INTO %s (%s) VALUES (%s)"
           (name tablename)
           (s/join ", " col-names)
-          (s/join ", " (repeat (count col-names) "?"))))}))
-                                  
+          (s/join ", " (repeat (count col-names) "?")))
+        {:return-keys true})
+      has-id-col cols]}))
+    
+(defn populate-statement!
+  [db ^java.sql.PreparedStatement stmt column-keys row]
+  (.clearParameters stmt)
+  (loop [[kk & rst] column-keys
+         idx 1]
+    (when kk
+      (.setObject stmt idx (jdbc/sql-value (get row kk)))
+      (recur rst (inc idx)))))
+
+(defn param-count
+  [^java.sql.PreparedStatement stmt]
+  (.getParameterCount (.getParameterMetaData stmt)))
+
+(defn param-type-names
+  [^java.sql.PreparedStatement stmt]
+  (for [idx (range (param-count stmt))]
+    (.getParameterClassName (.getParameterMetaData stmt) (inc idx))))
+
 (defn insert-row!
   [db tablename row]
   (let [db (maybe-deref db)
-        cols (map first (get (:tables db) tablename))
-        ^java.sql.PreparedStatement query (get (:insert-queries db) tablename)
-        values (for [col cols] (get row col))]
-    (loop [[col & rst] values
-           idx 1]
-      (.setObject query idx col)
-      (if-not (nil? rst)
-        (recur rst (inc idx))))
-    (.executeUpdate query) 
-    (with-open [^java.sql.ResultSet rs (.getGeneratedKeys query)]
-      (let [^java.sql.ResultSetMetaData mm (.getMetaData rs)
-            n-cols (.getColumnCount mm)
-            ^int id-col (some (fn [^long idx] (= (.getColumnName mm idx) "id")) (range n-cols))]
-        (if id-col
-          (assoc row :id (.getLong rs id-col))
-          row)))))
-
+        [^java.sql.PreparedStatement query has-id-col? cols] (get (:insert-queries db) tablename)]
+    (populate-statement! db query cols row)
+    (.executeUpdate query)
+    (.commit ^java.sql.Connection (:connection db))
+    (if has-id-col?
+      (assoc row :id (last-row-id db))
+      row)))
+                
 (defn get-by-id
   [db table id]
-  (cached db [:by-id table id]  
-    (let [db (maybe-deref db)
-          by-id-query (get-by-id-query db table)]
-      (run-prepared-query db by-id-query [id] first))))
+  (let [db (maybe-deref db)
+        [by-id-query by-id-constructor] (get-by-id-query db table)]
+    (run-prepared-query db by-id-query [id]
+      (fn [^java.sql.ResultSet rs]
+        (when (.next rs)
+          (by-id-constructor rs))))))
 
 (defn update-row!
   [db table-name row]
@@ -217,7 +269,7 @@
         id (:id row)
         where-clause ["id = ?" id]
         res (jdbc/update! db table-name row where-clause)]
-    (.remove ^java.util.Map (:cache db) [:by-id table-name id])
+    (.commit ^java.sql.Connection (:connection db))
     res))
 
 (defn populate-queries
@@ -228,12 +280,13 @@
        :by-id-queries (reduce merge
                         (for [[tablename specs] tables]
                           (if (table-spec-has-id? specs) 
-                            (generate-by-id-query db tablename)
+                            (generate-by-id-query db tablename specs)
                             {})))
       :insert-queries (reduce merge (map (partial generate-insert-query db) tables))})
     @db-create-actions))
                         
 (defn create-db
   [config]
-    {:connection (jdbc/get-connection (:db config))})
+  (let [conn (jdbc/get-connection (:db config))]
+    {:connection conn}))
     

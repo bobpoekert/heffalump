@@ -12,7 +12,7 @@
            [clojure.data.fressian :as fress]
            [byte-streams :as bs]))
 
-(def id-column [:id :int "PRIMARY KEY" "GENERATED ALWAYS AS IDENTITY"])
+(def id-column [:id "INTEGER NOT NULL PRIMARY KEY GENERATED ALWAYS AS IDENTITY (start with 1, increment by 1)"])
 
 (def table-specs
   [
@@ -86,6 +86,7 @@
 (def indexes
   [
     [:accounts :auth_token]
+    [:accounts :username]
     [:mentions :status_id]
     [:mentions :recipient_id]
     [:media_attributes :status_id]
@@ -93,20 +94,14 @@
     [:account_blocks :blocker]
     [:account_mutes :muter]])
 
-(def fk-constraints
-  [
-    [[:media_attributes :status_id] [:statuses :id]]
-    [[:mentions :status_id] [:statuses :id]]
-    [[:statuses :account_id] [:accounts :id]]])
-
 (defquery get-dump-query
-  [k entity]
+  [k entity] [:v]
   "select v from dump where k = ? and entity = ?")
 
 (defn get-dump
   ([db k] (get-dump db k nil))
   ([db k entity]
-    (let [result-string (:v (get-dump-query db first k entity))]
+    (let [result-string (:v (get-dump-query db k entity))]
       (if result-string
         (fress/read (bs/convert result-string java.io.Reader))))))
 
@@ -120,28 +115,28 @@
 
 (defn new-auth-token
   []
-  (b64encode (random-number 256)))
+  (b64encode (random-number 32)))
 
 (defn setup-db!
   [db]
   (jdbc/with-db-transaction [txn db]
     (create-tables! txn table-specs)
     (create-indexes! txn indexes)
-    ;(create-fk-constraints! txn fk-constraints)
     (jdbc/execute! txn "create sequence thread_id_sequence start with 0")
     (jdbc/execute! txn "create sequence clock_sequence start with 0")))
 
 (defn init!
   [config]
   (let [db-setup? (atom false)
-        cache (create-cache)]
+        cache (create-cache)
+        pathname (:subname (:db config))
+        new-db-file (or (.startsWith ^String pathname "memory:")
+                       (not (.exists (io/file pathname))))]
     (thread-local
-      (let [db (create-db config)
-            pathname (:subname (:db config))]
+      (let [db (create-db config)]
         (when (and (not @db-setup?)
                    (:init-db config)
-                   (or (.startsWith ^String pathname "memory:")
-                       (not (.exists (io/file pathname)))))
+                   new-db-file)
           (setup-db! db)
           (swap! db-setup? (fn [v] true)))
         (assoc
@@ -149,19 +144,36 @@
           :cache cache)))))
 
 (defn create-local-account!
-  [db & {:keys [username password]}]
-  (let [ph (hash-password password)
+  [db acc]
+  (let [ph (hash-password (:password acc))
         auth-token (new-auth-token)]
     (insert-row! db :accounts
       {
-        :username username
+        :username (:username acc)
         :password_hash ph
         :auth_token auth-token})))
 
-(defquery new-thread-id
-  []
+(defquery new-thread-id!
+  [] [:v]
   "VALUES NEXT VALUE FOR thread_id_sequence"
-  #(:1 (first %)))
+  #(:v (first %)))
+
+(defquery new-clock!
+  [] [:v]
+  "VALUES NEXT VALUE FOR clock_sequence"
+  #(:v (first %)))
+
+(defquery log-in-query
+  [username] [:password_hash :auth_token]
+  "select password_hash, auth_token from accounts where username = ?"
+  first)
+
+(defn log-in
+  [db username password]
+  (let [res (log-in-query db username)]
+    (if (check-password (:password_hash res) password)
+      (:auth_token res)
+      nil)))
 
 (defn create-status!
   [db & {:keys [uri url account_id in_reply_to_id reblog content application_id]
@@ -184,17 +196,31 @@
           :content content
           :application_id application_id}))))
 
-(defquery get-id-by-thread-id
-  [thread-id]
+(defn get-account-by-id
+  [db id]
+  (cached db [:account-by-id id]
+    (get-by-id db :accounts id)))
+
+(defquery get-ids-by-thread-id
+  [thread-id] [:id]
   "select id from statuses where thread_id = ? order by thread_depth")
+
+(defn get-status-by-id
+  [db id]
+  (cached db [:status-by-id id]
+    (get-by-id db :statuses id)))
 
 (defn get-thread
   [db status-id]
-  (get-id-by-thread-id db first (:thread_id (get-by-id db :statuses status-id))))
+  (get-ids-by-thread-id db
+    #(mapv (partial get-status-by-id db) %)
+    (:thread_id (get-status-by-id db status-id))))
+    
 
 (defquery get-id-by-auth-token-query
-  [auth-token]
-  "select id from accounts where auth_token = ?")
+  [auth-token] [:id]
+  "select id from accounts where auth_token = ?"
+  #(:id (first %)))
 
 (defn get-id-by-auth-token
   [db auth-token]
