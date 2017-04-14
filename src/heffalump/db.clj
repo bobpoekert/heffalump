@@ -1,10 +1,4 @@
 (ns heffalump.db
-  (import [com.google.common.cache CacheBuilder]
-          [javax.crypto SecretKey SecretKeyFactory]
-          [javax.crypto.spec PBEKeySpec]
-          [java.security SecureRandom]
-          [org.mindrot.jbcrypt BCrypt]
-          ThreadLocalThing)
   (require [heffalump.db-utils :refer :all]
            [clojure.string :as s]
            [clojure.java.io :as io]
@@ -196,27 +190,18 @@
           :content content
           :application_id application_id}))))
 
-(defn get-account-by-id
-  [db id]
-  (cached db [:account-by-id id]
-    (get-by-id db :accounts id)))
-
 (defquery get-ids-by-thread-id
   [thread-id] [:id]
   "select id from statuses where thread_id = ? order by thread_depth")
 
-(defn get-status-by-id
-  [db id]
-  (cached db [:status-by-id id]
-    (get-by-id db :statuses id)))
-
 (defn get-thread
   [db status-id]
-  (get-ids-by-thread-id db
-    #(mapv (partial get-status-by-id db) %)
-    (:thread_id (get-status-by-id db status-id))))
+  (mapv
+    (fn [id] (get-by-id db :statuses id))
+    (get-ids-by-thread-id db
+      #(mapv :id %)
+      (:thread_id (get-by-id db :statuses status-id)))))
     
-
 (defquery get-id-by-auth-token-query
   [auth-token] [:id]
   "select id from accounts where auth_token = ?"
@@ -225,7 +210,14 @@
 (defn get-id-by-auth-token
   [db auth-token]
   (cached db [:auth-token-id auth-token]
-    (get-id-by-auth-token-query db first auth-token))) 
+    (get-id-by-auth-token-query db auth-token))) 
+
+(defn change-auth-token!
+  [db account-id]
+  (let [new-token (new-auth-token)
+        old-token (:auth-token (get-by-id db :accounts account-id))]
+    (update-row! db :accounts {:id account-id :auth_token new-token})
+    (delete-cache! db [:auth-token-id old-token])))
 
 (defn token-user
   [db auth-token]

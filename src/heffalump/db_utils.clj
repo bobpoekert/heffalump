@@ -258,10 +258,16 @@
   [db table id]
   (let [db (maybe-deref db)
         [by-id-query by-id-constructor] (get-by-id-query db table)]
-    (run-prepared-query db by-id-query [id]
-      (fn [^java.sql.ResultSet rs]
-        (when (.next rs)
-          (by-id-constructor rs))))))
+    (cached db [:by-id-result table id]
+      (run-prepared-query db by-id-query [id]
+        (fn [^java.sql.ResultSet rs]
+          (when (.next rs)
+            (by-id-constructor rs)))))))
+
+(defn delete-cache!
+  [db k]
+  (let [^java.util.Map cache (:cache (maybe-deref db))]
+    (.remove cache k)))
 
 (defn update-row!
   [db table-name row]
@@ -269,6 +275,7 @@
         id (:id row)
         where-clause ["id = ?" id]
         res (jdbc/update! db table-name row where-clause)]
+    (delete-cache! db [:by-id-result table-name id])
     (.commit ^java.sql.Connection (:connection db))
     res))
 
@@ -289,4 +296,3 @@
   [config]
   (let [conn (jdbc/get-connection (:db config))]
     {:connection conn}))
-    
