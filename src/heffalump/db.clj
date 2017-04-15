@@ -1,4 +1,5 @@
 (ns heffalump.db
+  (import IdList)
   (require [heffalump.db-utils :refer :all]
            [clojure.string :as s]
            [clojure.java.io :as io]
@@ -75,7 +76,11 @@
       [
         id-column
         [:muter :int]
-        [:mutee :int]]]])
+        [:mutee :int]]]
+    [:account_follows
+      [
+        [:follower :int]
+        [:followee :int]]]])
    
 (def indexes
   [
@@ -86,7 +91,46 @@
     [:media_attributes :status_id]
     [:statuses :thread_id]
     [:account_blocks :blocker]
-    [:account_mutes :muter]])
+    [:account_mutes :muter]
+    [:account_follows :follower]
+    [:account_follows :followee]])
+
+(defquery get-followers
+  [account-id] [:id]
+  "select followee from account_follows where follower = ?"
+  #(mapv :id %))
+
+(defquery get-following
+  [account-id] [:id]
+  "select follower from account_follows where followee = ?"
+  #(mapv :id %))
+
+(defquery get-feed-query
+  [account-id] [:id]
+  "select statuses.id from statuses where statuses.account_id in (
+    select followee from account_follows where follower = ?
+  ) order by statuses.id"
+  #(IdList. 1000 (take 1000 (map :id %))))
+
+(defn get-feed-ids
+  [db account-id]
+  (cached db [:account-feed account-id]
+    (get-feed-query db account-id 1000)))
+
+(defn get-feed-statuses
+  [db account-id]
+  (mapv #(get-by-id db :statuses %) (get-feed-ids db account-id)))
+
+(defn update-feed!
+  [db post-id follower-id]
+  (if-let [^IdList cached-feed (get-cache db [:account-feed follower-id])]
+    (.add cached-feed post-id)))
+
+(defn new-post-update-feeds!
+  [db poster-id post-id]
+  (let [followers (get-followers db poster-id)]
+    (doseq [follower followers]
+      (update-feed! db post-id follower))))
 
 (defquery get-dump-query
   [k entity] [:v]
@@ -177,18 +221,20 @@
           thread_id (if reply-target
                       (:thread_id reply-target)
                       (new-thread-id! tc))
-          thread_depth (if reply-target (inc (:thread_depth reply-target)) 0)]
-      (insert-row! tc :statuses
-        {
-          :uri uri
-          :url url
-          :account_id account_id
-          :in_reply_to_id in_reply_to_id
-          :thread_id thread_id
-          :thread_depth thread_depth
-          :reblog reblog
-          :content content
-          :application_id application_id}))))
+          thread_depth (if reply-target (inc (:thread_depth reply-target)) 0)
+          status-id
+            (insert-row! tc :statuses
+              {
+                :uri uri
+                :url url
+                :account_id account_id
+                :in_reply_to_id in_reply_to_id
+                :thread_id thread_id
+                :thread_depth thread_depth
+                :reblog reblog
+                :content content
+                :application_id application_id})]
+      (new-post-update-feeds! db account_id status-id))))
 
 (defquery get-ids-by-thread-id
   [thread-id] [:id]

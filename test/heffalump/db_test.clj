@@ -1,9 +1,11 @@
 (ns heffalump.db-test
+  (import IdList)
   (require [clojure.test :refer :all]
            [clojure.test.check :as tc]
            [clojure.test.check.generators :as gen]
            [clojure.test.check.properties :as prop]
            [clojure.test.check.clojure-test :refer [defspec]]
+           clojure.data
            [heffalump.db :as d]
            [heffalump.db-utils :as du]))
 
@@ -60,7 +62,11 @@
     (let [insert-result (du/insert-row! db tablename row)
           id (:id insert-result)
           test-fetch (du/get-by-id db tablename id)]
-      (= insert-result test-fetch))))
+      (if (= insert-result test-fetch)
+        true
+        (do
+          (prn [insert-result id test-fetch])
+          false)))))
 
 (def global-test-db (new-test-db))
 
@@ -79,6 +85,7 @@
           (or (= (:password account) bad-password)
               (not (du/check-password (:password_hash refetch) bad-password))))))))
 
+(quote (
 (defspec test-status-roundtrip
   100
   (test-id-roundtrip global-test-db :statuses))
@@ -94,4 +101,27 @@
 (defspec test-mutes-roundtrip
   100
   (test-id-roundtrip global-test-db :account_mutes))
+))
 
+(defspec test-id-list-construct
+  10000
+  (prop/for-all [[start add size] (gen/tuple (gen/list gen/nat) (gen/list gen/nat) gen/nat)]
+    (if (or (< 1 size) (<= (dec size) (count start)))
+      true
+      (let [lst (IdList. size start)]
+        '(prn [(seq lst) start add (= (seq lst) start)size (.size lst) (.startIdx lst) (.endIdx lst)])
+        (and
+          (= (seq lst) start)
+          (or
+            (not (seq add))
+            (second
+              (reduce
+                (fn [[target ok?] item]
+                  (.put lst item)
+                  (let [new-target (take size (concat target (list item)))
+                        ok? (and ok? (= new-target (take (count new-target) (seq lst))))]
+                    (if (not ok?) 
+                      (prn [new-target (seq lst) item]))
+                    [new-target ok?]))
+                [start true]
+                add))))))))

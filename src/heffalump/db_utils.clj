@@ -111,6 +111,15 @@
     (.build)
     (.asMap)))
 
+(defn delete-cache!
+  [db k]
+  (let [^java.util.Map cache (:cache (maybe-deref db))]
+    (.remove cache k)))
+
+(defn get-cache
+  [db k]
+  (get (:cache (maybe-deref db)) k))
+
 (defmacro cached
   [db cache-key value-generator]
   `(let [cache-key# ~cache-key
@@ -251,12 +260,15 @@
     (.executeUpdate query)
     (.commit ^java.sql.Connection (:connection db))
     (if has-id-col?
-      (assoc row :id (last-row-id db))
+      (let [id (int (last-row-id db))]
+        (delete-cache! db [:by-id-results tablename id])
+        (assoc row :id (last-row-id db)))
       row)))
                 
 (defn get-by-id
   [db table id]
-  (let [db (maybe-deref db)
+  (let [id (int id)
+        db (maybe-deref db)
         [by-id-query by-id-constructor] (get-by-id-query db table)]
     (cached db [:by-id-result table id]
       (run-prepared-query db by-id-query [id]
@@ -264,10 +276,6 @@
           (when (.next rs)
             (by-id-constructor rs)))))))
 
-(defn delete-cache!
-  [db k]
-  (let [^java.util.Map cache (:cache (maybe-deref db))]
-    (.remove cache k)))
 
 (defn update-row!
   [db table-name row]
