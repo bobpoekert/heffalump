@@ -4,6 +4,7 @@ import clojure.lang.ISeq;
 import clojure.lang.IPersistentMap;
 import clojure.lang.Obj;
 import clojure.lang.PersistentList;
+import clojure.lang.Murmur3;
 import java.util.Arrays;
 
 class IdListSeq extends ASeq {
@@ -71,7 +72,20 @@ public class IdList implements Seqable {
     public IdList(IdList src) {
         this.ids = src.copyTo(this);
     }
-  
+ 
+    public int hashCode() {
+        int idx = this.startIdx;
+        int res = 31;
+        while (idx != this.endIdx) {
+            res ^= this.ids[idx];
+            idx++;
+            if (idx >= this.ids.length) {
+                idx = 0;
+            }
+        }
+        return Murmur3.hashInt(res);
+    } 
+
     public synchronized long[] copyTo(IdList target) {
         target.startIdx = this.startIdx;
         target.endIdx = this.endIdx;
