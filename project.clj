@@ -12,6 +12,7 @@
     [org.clojure/java.jdbc "0.7.0-alpha3"]
     [org.apache.derby/derby "10.13.1.1"]
     [com.google.guava/guava "21.0"]
+    [net.sf.trove4j/trove4j "3.0.3"]
     [byte-streams "0.2.2"]
     [org.clojure/data.fressian "0.2.1"]
     [org.mindrot/jbcrypt "0.4"]

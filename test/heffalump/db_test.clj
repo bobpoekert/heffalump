@@ -86,10 +86,6 @@
               (not (du/check-password (:password_hash refetch) bad-password))))))))
 
 (quote (
-(defspec test-status-roundtrip
-  100
-  (test-id-roundtrip global-test-db :statuses))
-
 (defspec test-media-attr-roundtrip
   100
   (test-id-roundtrip global-test-db :media_attributes))
@@ -109,7 +105,6 @@
     (if (or (< 1 size) (<= (dec size) (count start)))
       true
       (let [lst (IdList. size start)]
-        '(prn [(seq lst) start add (= (seq lst) start)size (.size lst) (.startIdx lst) (.endIdx lst)])
         (and
           (= (seq lst) start)
           (or

@@ -1,5 +1,6 @@
 (ns heffalump.db
-  (import IdList)
+  (import IdList
+          [gnu.trove.set.hash TLongHashSet])
   (require [heffalump.db-utils :refer :all]
            [clojure.string :as s]
            [clojure.java.io :as io]
@@ -95,7 +96,7 @@
     [:account_follows :follower]
     [:account_follows :followee]])
 
-(defquery get-followers
+(defquery get-followers-query
   [account-id] [:id]
   "select followee from account_follows where follower = ?"
   #(mapv :id %))
@@ -104,6 +105,29 @@
   [account-id] [:id]
   "select follower from account_follows where followee = ?"
   #(mapv :id %))
+
+(defn get-followers
+  [db account-id]
+  (cached db [:followers account-id]
+    (get-followers-query db 
+      #(TLongHashSet. (map :id %))
+      account-id)))
+
+(defn follow!
+  [db followee-id follower-id]
+  (insert-row! db :account_follows {:follower follower-id :followee followee-id})
+  (if-let [^TLongHashSet cache (get-cache db [:followers followee-id])]
+    (.add cache follower-id)))
+
+(defquery unfollow-query!
+  [followee-id follower-id] []
+  "delete from account_follows where followee = ? and follower = ?")
+
+(defn unfollow!
+  [db followee-id follower-id]
+  (unfollow-query! db followee-id follower-id)
+  (if-let [^TLongHashSet cache (get-cache db [:followers followee-id])]
+    (.remove cache follower-id)))
 
 (defquery get-feed-query
   [account-id] [:id]
@@ -124,7 +148,7 @@
 (defn update-feed!
   [db post-id follower-id]
   (if-let [^IdList cached-feed (get-cache db [:account-feed follower-id])]
-    (.add cached-feed post-id)))
+    (.put cached-feed post-id)))
 
 (defn new-post-update-feeds!
   [db poster-id post-id]
@@ -222,7 +246,7 @@
                       (:thread_id reply-target)
                       (new-thread-id! tc))
           thread_depth (if reply-target (inc (:thread_depth reply-target)) 0)
-          status-id
+          status
             (insert-row! tc :statuses
               {
                 :uri uri
@@ -234,7 +258,7 @@
                 :reblog reblog
                 :content content
                 :application_id application_id})]
-      (new-post-update-feeds! db account_id status-id))))
+      (new-post-update-feeds! db account_id (:id status)))))
 
 (defquery get-ids-by-thread-id
   [thread-id] [:id]
@@ -270,5 +294,3 @@
   (if-let [account-id (get-id-by-auth-token db auth-token)]
     ;; doing it this way so that both cache keys refer to the same object in memory
     (get-by-id db :accounts account-id)))
-
-

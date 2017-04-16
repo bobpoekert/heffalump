@@ -124,7 +124,7 @@
   [db cache-key value-generator]
   `(let [cache-key# ~cache-key
          ^java.util.Map cache# (:cache (maybe-deref ~db))
-         cache-value# (get cache# cache-key#)]
+         cache-value# (.get cache# cache-key#)]
     (if cache-value#
       cache-value#
       (let [result# ~value-generator]
@@ -275,7 +275,6 @@
         (fn [^java.sql.ResultSet rs]
           (when (.next rs)
             (by-id-constructor rs)))))))
-
 
 (defn update-row!
   [db table-name row]
