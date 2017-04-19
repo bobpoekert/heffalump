@@ -1,18 +1,69 @@
 (ns heffalump.app
   (require
-    [heffalump.db :as hdb]
+    [heffalump.db :as db]
+    [clojure.string :as s] 
     [aleph.http :as http]
+    [ring.middleware.cookies :refer-only [wrap-cookies]]
+    [ring.middleware.params :refer-only [wrap-params]]
     [compojure.core :as cj]
     [byte-streams :as bs]
-    [manifold.stream :as s]
+    [manifold.stream :as ms]
     [manifold.deferred :as d]
-    [manifold.bus :as bus]))
+    [manifold.bus :as bus]
+    [manifold.executor :as ex]
+    [cheshire.core :as json]))
 
 (defn create-app-state
   [db config]
   {
     :db db
-    :config config})
+    :config config
+    :db-executor (ex/fixed-thread-executor (or (:db-thread-count config) 1))})
+
+(defn in-db
+  [app-state thunk & fargs]
+  (->
+    (d/future (apply thunk (:db app-state) fargs))
+    (d/onto (:db-executor app-state))))
+
+(def auth-fail {
+  :status 401
+  :body (json/generate-string {
+    :error "The access token is invalid"})})
+
+(defn auth-token
+  [req]
+  (or
+    (:auth_token (:cookies req))
+    (if-let [auth-header (get (:headers req) "Authorization")]
+      (if (s/starts-with? auth-header "Bearer ")
+        (.substring ^String auth-header #=(.length "Bearer "))))))
+
+(defn authed
+  [app-state thunk]
+  (fn [req]
+    (let [token (auth-token req)]
+      (if-not token
+        auth-fail
+        (d/let-flow [auth-user (in-db app-state db/token-user token)]
+          (if auth-user
+            (thunk app-state req auth-user)
+            auth-fail))))))
+
+(defn creates-status
+  [app-state]
+  (->
+    (authed app-state)
+    (fn [req auth-user]
+      (let [account-id (:id auth-user)
+            reply-id (:in_reply_to_id req)
+            content (:content req)]
+        (d/let-flow [db-res (in-db app-state db/create-status! {
+                              :account_id account-id
+                              :in_reply_to_id reply-id
+                              :content content})]
+          
+  
 
 (defn create-routes
   [app-state]
@@ -53,7 +104,10 @@
   [db config]
   (let [state (create-app-state db config)
         routes (create-routes config state)]
-    {:handler (params/wrap-params (routes))}))
+    {:handler (->
+                (wrap-params)
+                (wrap-cookies)
+                (routes))}))
 
 (defn run!
   [db config]

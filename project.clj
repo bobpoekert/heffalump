@@ -7,6 +7,7 @@
     [org.clojure/clojure "1.8.0"]
     [aleph "0.4.3"]
     [cheshire "5.7.0"]
+    [hiccup "1.0.5"]
     [org.clojure/data.xml "0.0.8"]
     [compojure "1.5.2"]
     [org.clojure/java.jdbc "0.7.0-alpha3"]

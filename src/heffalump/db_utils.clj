@@ -2,7 +2,7 @@
   (import [com.google.common.cache CacheBuilder]
           [javax.crypto SecretKey SecretKeyFactory]
           [javax.crypto.spec PBEKeySpec]
-          [java.security SecureRandom]
+          [java.security SecureRandom KeyPairGenerator]
           [org.mindrot.jbcrypt BCrypt]
           ThreadLocalThing)
   (require [clojure.string :as s]
@@ -103,6 +103,14 @@
   (let [encoder (java.util.Base64/getEncoder)]
     (.encodeToString encoder (bs/to-byte-array ins))))
 
+(defn rsa-keypair
+  []
+  (let [gen (KeyPairGenerator/getInstance "RSA")]
+    (.initialize gen 2048)
+    (let [pair (.getKeyPair gen)]
+      [(.getBytes (.getPublic pair))
+       (.getBytes (.getPrivate pair))])))
+    
 (defn create-cache
   []
   (->
@@ -119,6 +127,11 @@
 (defn get-cache
   [db k]
   (get (:cache (maybe-deref db)) k))
+
+(defn put-cache
+  [db k v]
+  (let [^java.util.Map cache (:cache (maybe-deref db))]
+    (.put cache k v)))
 
 (defmacro cached
   [db cache-key value-generator]

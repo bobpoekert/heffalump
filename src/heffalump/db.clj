@@ -10,6 +10,85 @@
 
 (def id-column [:id "INTEGER NOT NULL PRIMARY KEY GENERATED ALWAYS AS IDENTITY (start with 1, increment by 1)"])
 
+(def verbs [
+  :follow ; [follower:Account, followee:Account]
+  :request_friend ; [follower:Account, followee:Account]
+  :authorize ; [follow-request-id]
+  :reject ; [follow-request-id]
+  :unfollow ; [follower:Account, followee:Account]
+  :block ; [blocker:Account, blockee:Account]
+  :unblock ; [blocker:Account, blockee:Account]
+  :share ; [post:Status] (:reblog for this status should be non-null)
+  :favorite ; [faver:Account, post:Status]
+  :unfavorite ; [faver:Account, post:Status]
+])
+
+(defrecord FollowAction [follower followee])
+(defrecord FriendRequestAction [follower followee])
+(defrecord AuthorizeAction [follow-request follower followee])
+(defrecord RejectAction [follow-request follower followee])
+(defrecord UnfollowAction [follower followee])
+(defrecord BlockAction [blocker blockee])
+(defrecord UnblockAction [blocker blockee])
+(defrecord ShareAction [status])
+(defrecord FavAction [faver status])
+(defrecord UnfavAction [faver status])
+
+(defn inflate-log-action
+  [db row]
+  (case (nth verbs (:verb db))
+    :follow (FollowAction.
+              (get-by-id db :accounts (:source row))
+              (get-by-id db :accounts (:target row)))
+    :request_friend (FriendRequestAction.
+                      (get-by-id :accounts (:source row))
+                      (get-by-id :accounts (:target row)))
+    :authorize (let [follow-request (get-by-id db :follow_requests (:target row))]
+                (AuthorizeAction.
+                  follow-request
+                  (get-by-id db :accounts (:follower follow-request))
+                  (get-by-id db :accounts (:followee follow-request))))
+    :reject (let [follow-request (get-by-id db :follow_requests (:target row))]
+              (RejectAction.
+                follow-request
+                (get-by-id db :accounts (:source follow-request))
+                (get-by-id db :accounts (:target follow-request))))
+    :unfollow (UnfollowAction.
+                (get-by-id db :accounts (:source row))
+                (get-by-id db :accounts (:target row)))
+    :share (ShareAction.
+            (get-status db (:target row)))
+    :favorite (FavAction.
+                (get-by-id db :accounts (:source row))
+                (get-status db (:target row)))))
+
+(defprotocol ActionType
+  (action-type [v]))
+
+(extend-protocol ActionType
+  FollowAction
+  (action-type [v] :follow)
+  FriendRequestAction
+  (action-type [v] :request_friend)
+  AuthorizeAction
+  (action-type[v] :authorize)
+  RejectAction
+  (action-type [v] :reject)
+  UnfollowAction
+  (action-type [v] :unfollow)
+  BlockAction
+  (action-type [v] :block)
+  UnblockAction
+  (action-type [v] :unblock)
+  ShareAction
+  (action-type [v] :share)
+  FavAction
+  (action-type [v] :favorite))
+
+(def scopes [:public :private])
+(def visibilities [
+  :public :unlisted :private :direct])
+
 (def table-specs
   [
     [:dump
@@ -17,6 +96,19 @@
         [:entity :int]
         [:k :text]
         [:v :text]]]
+    [:action_log
+      [
+        id-column
+        [:created_at :int]
+        [:source :int]
+        [:target :int]
+        [:verb :int]]]
+    [:follow_requests
+      [
+        id-column
+        [:follower :int]
+        [:followee :int]
+        [:created_at :int]]]
     [:statuses
       ;; statuses are immutable with the exception of the deleted_at column
       [
@@ -34,8 +126,13 @@
         [:created_at :int] ; UTC epoch timestamp of when this status was created
         ;; reblogs_count is a thing in the API response but that doesn't belong in the DB
         ;; likewise favourites_count
+        [:nsfw :boolean]
+        [:cw_text :text]
+        [:object_type :int]
+        [:verb :int]
         [:application_id :int] ; which Application posted this
         [:deleted_at :int]
+        [:visibility :int]
         ]]
     [:media_attributes
       [
@@ -43,7 +140,8 @@
         [:status_id :int]
         [:url :text] ; image asset URL
         [:preview_url :text] ; image preview (ie: resized) asset url
-        [:type :int] ; 0 for image and 1 for video
+        [:content_type "VARCHAR(64)"] ; mime type
+        [:file_size :int]
       ]]
     [:mentions
       [
@@ -66,7 +164,11 @@
       ;; followers_count, following_count, and statuses_count can be computed
       [:password_hash :text]
       [:auth_token :text]
+      [:scope :int] ;; 0: public, 1: private
+      [:public_key :text] ;; todo: make correct length
+      [:private_key :text]
       [:deleted_at :int]
+      [:updated_at :int]
       ]]
     [:account_blocks
       [
@@ -85,6 +187,7 @@
    
 (def indexes
   [
+    [:stream_entries :account_id]
     [:accounts :auth_token]
     [:accounts :username]
     [:mentions :status_id]
@@ -95,6 +198,16 @@
     [:account_mutes :muter]
     [:account_follows :follower]
     [:account_follows :followee]])
+
+(defn display-name
+  [account]
+  (or
+    (:display_name account)
+    (:username account)))
+
+(defn url-for-account
+  [account]
+  "")
 
 (defquery get-followers-query
   [account-id] [:id]
@@ -112,6 +225,10 @@
     (get-followers-query db 
       #(TLongHashSet. (map :id %))
       account-id)))
+
+(defquery get-media-attrs
+  [status-id] [:url :preview_url :content_type :file_size]
+  "select url, preview_url, content_type, file_size from media_attributes where status_id = ?")
 
 (defn follow!
   [db followee-id follower-id]
@@ -143,7 +260,7 @@
 
 (defn get-feed-statuses
   [db account-id]
-  (mapv #(get-by-id db :statuses %) (get-feed-ids db account-id)))
+  (mapv (partial get-status db) (get-feed-ids db account-id)))
 
 (defn update-feed!
   [db post-id follower-id]
@@ -208,12 +325,15 @@
 (defn create-local-account!
   [db acc]
   (let [ph (hash-password (:password acc))
-        auth-token (new-auth-token)]
+        auth-token (new-auth-token)
+        [pubkey privkey] (rsa-keypair)]
     (insert-row! db :accounts
       {
         :username (:username acc)
         :password_hash ph
-        :auth_token auth-token})))
+        :auth_token auth-token
+        :public_key pubkey
+        :private_key privkey})))
 
 (defquery new-thread-id!
   [] [:v]
@@ -260,17 +380,52 @@
                 :application_id application_id})]
       (new-post-update-feeds! db account_id (:id status)))))
 
+(defquery delete-status-query
+  [status-id] []
+  "update statuses set deleted_at = now() where id = ?")
+
+(defn delete-status!
+  [db status-id]
+  (delete-status-query db status-id)
+  (let [cache-key [:by-id-results :statuses status-id]]
+    (if (get-cache db cache-key)
+      (put-cache! db cache-key :deleted))))
+
+(defn get-account
+  [db account-id]
+  (get-by-id db :accounts account-id))
+
+(defn get-status
+  [db status-id]
+  (let [res (get-by-id db :statuses status-id)]
+    (if (or (= res :deleted) (:deleted_at res))
+      nil
+      (->
+        res
+        (assoc :account (get-account db (:account_id res)))
+        (assoc :media (get-media-attrs db status-id))))))
+
 (defquery get-ids-by-thread-id
   [thread-id] [:id]
   "select id from statuses where thread_id = ? order by thread_depth")
 
+(defn status-html
+  [status]
+  (format "<pre>%s</pre>" (:body status)))
+
+(defn status-tags
+  [status]
+  '())
+
 (defn get-thread
   [db status-id]
-  (mapv
-    (fn [id] (get-by-id db :statuses id))
-    (get-ids-by-thread-id db
-      #(mapv :id %)
-      (:thread_id (get-by-id db :statuses status-id)))))
+  (vec
+    (filter #(not (= % :deleted))
+      (map
+        (partial get-status db)
+        (get-ids-by-thread-id db
+          #(mapv :id %)
+          (:thread_id (partial get-status db)))))))
     
 (defquery get-id-by-auth-token-query
   [auth-token] [:id]
