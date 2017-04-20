@@ -122,18 +122,25 @@
         [:thread_id :int]
         [:thread_depth :int]
         [:reblog :int] ; null or status
-        [:content :text] ; Body of the status. Contains HTML
+        [:content :text] ; Body of the status
         [:created_at :int] ; UTC epoch timestamp of when this status was created
         ;; reblogs_count is a thing in the API response but that doesn't belong in the DB
         ;; likewise favourites_count
         [:nsfw :boolean]
         [:cw_text :text]
-        [:object_type :int]
         [:verb :int]
         [:application_id :int] ; which Application posted this
         [:deleted_at :int]
         [:visibility :int]
         ]]
+    [:hubub_subs
+      [
+        id-column
+        [:account_id :int]
+        [:callback_url :text]
+        [:confirmed :boolean]
+        [:expires_at :int]
+        [:confirmation_secret "VARCHAR(200)"]]]
     [:media_attributes
       [
         id-column
@@ -165,8 +172,7 @@
       [:password_hash :text]
       [:auth_token :text]
       [:scope :int] ;; 0: public, 1: private
-      [:public_key :text] ;; todo: make correct length
-      [:private_key :text]
+      [:keypair :clob]
       [:deleted_at :int]
       [:updated_at :int]
       ]]
@@ -292,6 +298,33 @@
       :k k
       :v (fress/write v)})))
 
+(defquery blocked-query
+  [blocker blockee] []
+  "select from account_blocks where blocker = ? and blockee = ?"
+  #(boolean (seq %)))
+
+(defn blocks?
+  [db blocker blockee]
+  (cached db [:blocks? (id-or-int blocker) (id-or-int blockee)]
+    (blocked-query db (id-or-int blocker) (id-or-int blockee))))
+
+(defn block!
+  [db blocker blockee]
+  (if-not (blocks? db blocker blockee)
+    (let [blocker (id-or-int blocker) blockee (id-or-int blockee)]
+      (inert-row! db :account_blocks {:blocker blocker :blockee blockee})
+      (put-cache! db [:blocks? blocker blockee] true))))
+
+(defquery unblock-query
+  [blocker blockee] []
+  "delete from account_blocks where blocker = ? and blockee = ?")
+
+(defn unblock!
+  [db blocker blockee]
+  (let [blocker (id-or-int blocker) blockee (id-or-int blockee)]
+    (unblock-query db blocker blockee)
+    (put-cache! db [:blocks? blocker blockee] false)))
+
 (defn new-auth-token
   []
   (b64encode (random-number 32)))
@@ -326,14 +359,13 @@
   [db acc]
   (let [ph (hash-password (:password acc))
         auth-token (new-auth-token)
-        [pubkey privkey] (rsa-keypair)]
+        keypair (rsa-keypair)]
     (insert-row! db :accounts
       {
         :username (:username acc)
         :password_hash ph
         :auth_token auth-token
-        :public_key pubkey
-        :private_key privkey})))
+        :rsa_keypair (serialize keypair)})))
 
 (defquery new-thread-id!
   [] [:v]
@@ -393,7 +425,8 @@
 
 (defn get-account
   [db account-id]
-  (get-by-id db :accounts account-id))
+  (let [res (get-by-id db :accounts account-id)]
+    (assoc res :keypair (deserialize (:keypair res)))))
 
 (defn get-status
   [db status-id]

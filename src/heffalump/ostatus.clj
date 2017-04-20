@@ -1,7 +1,11 @@
 (ns heffalump.ostatus
-  (import [java.time Instant])
+  (import [java.time Instant]
+          [java.security PublicKey PrivateKey Signature])
   (require [clojure.data.xml :refer-only [element alias-uri cdata]]
-           [heffalump.db :as db]))
+           [clojure.string :as s]
+           [byte-streams :as bs]
+           [heffalump.db :as db]
+           [heffalump.db-utils :refer-only [b64encode]]))
 
 (defn iso-string
   [epoch-int]
@@ -9,6 +13,7 @@
 
 ;; reference: https://github.com/tootsuite/mastodon/blob/15ec4ae07b17821625bd2ca1088a7573a7ed128c/app/lib/atom_serializer.rb
 ;; https://github.com/tootsuite/mastodon/blob/a9529d3b4b057eeb3b47943b271ad6605e22732d/app/lib/tag_manager.rb
+;; https://github.com/tootsuite/ostatus2/blob/master/lib/ostatus2/salmon.rb
 
 (alias-uri 'xmlns        "http://www.w3.org/2005/Atom")
 (alias-uri 'media  "http://purl.org/syndication/atommedia")
@@ -18,6 +23,7 @@
 (alias-uri 'dfrn   "http://purl.org/macgirvin/dfrn/1.0")
 (alias-uri 'os     "http://ostatus.org/schema/1.0")
 (alias-uri 'mtdn  "http://mastodon.social/schema/1.0")
+(alias-uri 'magic "http://salmon-protocol.org/ns/magic-env")
 
 (def verbs {
   :post           "http://activitystrea.ms/schema/1.0/post"
@@ -281,3 +287,28 @@
         (element ::thr/in-reply-to {
           :ref (db/thread-uri (:status action))
           :href (db/thread-url (:status action))})))))
+
+(defn plaintext-signature
+  [data typ encoding alg]
+  (s/join "." (map (partial b64encode :url) [data typ encoding alg])))
+
+(defn sign
+  [body privkey]
+  (let [privkey (unpack-privkey privkey)
+        sig (Signature/getInstance "SHA256withRSA")]
+    (.initSign sig privkey)
+    (.update sig (bs/to-byte-array body))
+    (b64encode :url (.sign sig))))
+
+(defn pack
+  [body ^PublicKey pubkey ^PrivateKey privkey]
+  (let [mimetype "application/atom+xml"
+        encoding "base64url"
+        alg "RSA-SHA256"
+        sigtext (plaintext-signature body mimetype encoding alg)
+        sig (sign sigtext privkey)]
+    (element ::magic/me {}
+      (element ::magic/data {:type "application/atom+xml"} (b64encode :url body))
+      (element ::magic/encoding {} encoding)
+      (element ::magic/alg {} alg)
+      (element ::magic/sig {:key_id (base64 (.getEncoded pubKey))} sig))))

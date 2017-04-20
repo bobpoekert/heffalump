@@ -3,6 +3,7 @@
           [javax.crypto SecretKey SecretKeyFactory]
           [javax.crypto.spec PBEKeySpec]
           [java.security SecureRandom KeyPairGenerator]
+          [java.io ObjectInputStream ObjectOutputStream ByteArrayOutputStream]
           [org.mindrot.jbcrypt BCrypt]
           ThreadLocalThing)
   (require [clojure.string :as s]
@@ -99,18 +100,34 @@
     (.generateSeed size)))
 
 (defn b64encode
-  [ins]
-  (let [encoder (java.util.Base64/getEncoder)]
-    (.encodeToString encoder (bs/to-byte-array ins))))
+  ([ins] (b64encode ins :default))
+  ([mode ins]
+    (let [encoder (case mode
+                    :default (java.util.Base64/getEncoder)
+                    :url (java.util.Base64/getUrlEncoder)
+                    :mime (java.util.Base84/getMimeEncoder))]
+      (.encodeToString encoder (bs/to-byte-array ins)))))
 
 (defn rsa-keypair
   []
   (let [gen (KeyPairGenerator/getInstance "RSA")]
     (.initialize gen 2048)
-    (let [pair (.getKeyPair gen)]
-      [(.getBytes (.getPublic pair))
-       (.getBytes (.getPrivate pair))])))
+    (.getKeyPair gen)))
+
+(defn serialize
+  [o]
+  (with-open [bao (ByteArrayOutputStream.)
+              oo (ObjectOutputStream. bao)]
+    (.writeObject oo o)
+    (.toByteArray bao)))
+
+(defn deserialize
+  [blob]
+  (with-open [blob (bs/to-input-stream blob)
+              ois (ObjectInputStream. blob)]
+    (.readObject ois)))
     
+
 (defn create-cache
   []
   (->
@@ -128,7 +145,7 @@
   [db k]
   (get (:cache (maybe-deref db)) k))
 
-(defn put-cache
+(defn put-cache!
   [db k v]
   (let [^java.util.Map cache (:cache (maybe-deref db))]
     (.put cache k v)))
@@ -316,3 +333,14 @@
   [config]
   (let [conn (jdbc/get-connection (:db config))]
     {:connection conn}))
+
+(defprotocol IdOrInt
+  (id-or-int [v]))
+
+(extend-protocol IdOrInt
+  Integer
+  (id-or-int [v] v)
+  Long
+  (id-or-int [v] v)
+  java.util.Map
+  (id-or-int [v] (:id v)))
