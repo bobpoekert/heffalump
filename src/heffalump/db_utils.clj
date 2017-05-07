@@ -290,14 +290,14 @@
     (.executeUpdate query)
     (.commit ^java.sql.Connection (:connection db))
     (if has-id-col?
-      (let [id (int (last-row-id db))]
+      (let [id (long (last-row-id db))]
         (delete-cache! db [:by-id-results tablename id])
-        (assoc row :id (last-row-id db)))
+        (assoc row :id id))
       row)))
                 
 (defn get-by-id
   [db table id]
-  (let [id (int id)
+  (let [id (long id)
         db (maybe-deref db)
         [by-id-query by-id-constructor] (get-by-id-query db table)]
     (cached db [:by-id-result table id]
