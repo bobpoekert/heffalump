@@ -1,5 +1,5 @@
 (ns heffalump.config
-  (require [clojure.java.io :as io]))
+  (:require [clojure.java.io :as io]))
 
 (def default-config
   (let [data-dir "~/.heffalump"]

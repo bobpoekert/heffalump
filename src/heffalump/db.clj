@@ -1,7 +1,7 @@
 (ns heffalump.db
-  (import IdList
+  (:import IdList
           [gnu.trove.set.hash TLongHashSet])
-  (require [heffalump.db-utils :refer :all]
+  (:require [heffalump.db-utils :refer :all]
            [clojure.string :as s]
            [clojure.java.io :as io]
            [clojure.java.jdbc :as jdbc]
@@ -33,6 +33,9 @@
 (defrecord ShareAction [status])
 (defrecord FavAction [faver status])
 (defrecord UnfavAction [faver status])
+
+(declare get-account)
+(declare get-status)
 
 (defn inflate-log-action
   [db row]
@@ -122,7 +125,7 @@
         [:thread_id :int]
         [:thread_depth :int]
         [:reblog :int] ; null or status
-        [:content :text] ; Body of the status
+        [:content :clob] ; Body of the status
         [:created_at :int] ; UTC epoch timestamp of when this status was created
         ;; reblogs_count is a thing in the API response but that doesn't belong in the DB
         ;; likewise favourites_count
@@ -133,6 +136,10 @@
         [:deleted_at :int]
         [:visibility :int]
         ]]
+    [:status_tags
+      [
+        [:status_id :int]
+        [:tag :text]]]
     [:hubub_subs
       [
         id-column
@@ -162,7 +169,7 @@
       [
       id-column
       [:username :text]
-      [:acct :text] ; null for local users (use username), username@domain for remote
+      [:qualified_username :text] ; null for local users (use username), username@domain for remote
       [:display_name :text]
       [:note :text] ; biography of user
       [:url :text] ; profile page URL (can be remote)
@@ -193,13 +200,13 @@
    
 (def indexes
   [
-    [:stream_entries :account_id]
     [:accounts :auth_token]
     [:accounts :username]
     [:mentions :status_id]
     [:mentions :recipient_id]
     [:media_attributes :status_id]
     [:statuses :thread_id]
+    [:status_tags :status_id]
     [:account_blocks :blocker]
     [:account_mutes :muter]
     [:account_follows :follower]
@@ -299,8 +306,8 @@
       :v (fress/write v)})))
 
 (defquery blocked-query
-  [blocker blockee] []
-  "select from account_blocks where blocker = ? and blockee = ?"
+  [blocker blockee] [:blocker]
+  "select blocker from account_blocks where blocker = ? and blockee = ?"
   #(boolean (seq %)))
 
 (defn blocks?
@@ -312,7 +319,7 @@
   [db blocker blockee]
   (if-not (blocks? db blocker blockee)
     (let [blocker (id-or-int blocker) blockee (id-or-int blockee)]
-      (inert-row! db :account_blocks {:blocker blocker :blockee blockee})
+      (insert-row! db :account_blocks {:blocker blocker :blockee blockee})
       (put-cache! db [:blocks? blocker blockee] true))))
 
 (defquery unblock-query
@@ -349,8 +356,8 @@
         (when (and (not @db-setup?)
                    (:init-db config)
                    new-db-file)
-          (setup-db! db)
-          (swap! db-setup? (fn [v] true)))
+          (swap! db-setup? (fn [v] true))
+          (setup-db! db))
         (assoc
           (populate-queries db table-specs)
           :cache cache)))))
@@ -390,35 +397,26 @@
       nil)))
 
 (defn create-status!
-  [db & {:keys [uri url account_id in_reply_to_id reblog content application_id]
-         :else {:application_id nil :reblog nil :in_reply_to_id nil}}]
+  [db status]
   (jdbc/with-db-transaction [tc db]
-    (let [reply-target (if in_reply_to_id (get-by-id tc :statuses in_reply_to_id))
+    (let [in_reply_to_id (:in_reply_to_id status)
+          account_id (:account_id status)
+          reply-target (if in_reply_to_id (get-by-id tc :statuses in_reply_to_id))
           thread_id (if reply-target
                       (:thread_id reply-target)
                       (new-thread-id! tc))
           thread_depth (if reply-target (inc (:thread_depth reply-target)) 0)
           status
-            (insert-row! tc :statuses
-              {
-                :uri uri
-                :url url
-                :account_id account_id
-                :in_reply_to_id in_reply_to_id
-                :thread_id thread_id
-                :thread_depth thread_depth
-                :reblog reblog
-                :content content
-                :application_id application_id})]
+            (insert-row! tc :statuses status)]
       (new-post-update-feeds! db account_id (:id status)))))
 
 (defquery delete-status-query
-  [status-id] []
-  "update statuses set deleted_at = now() where id = ?")
+  [delete-time status-id] []
+  "update statuses set deleted_at = ? where id = ?")
 
 (defn delete-status!
   [db status-id]
-  (delete-status-query db status-id)
+  (delete-status-query db (now) status-id)
   (let [cache-key [:by-id-results :statuses status-id]]
     (if (get-cache db cache-key)
       (put-cache! db cache-key :deleted))))
@@ -426,7 +424,8 @@
 (defn get-account
   [db account-id]
   (let [res (get-by-id db :accounts account-id)]
-    (assoc res :keypair (deserialize (:keypair res)))))
+    (if res
+      (assoc res :keypair (deserialize (:keypair res))))))
 
 (defn get-status
   [db status-id]
@@ -442,14 +441,6 @@
   [thread-id] [:id]
   "select id from statuses where thread_id = ? order by thread_depth")
 
-(defn status-html
-  [status]
-  (format "<pre>%s</pre>" (:body status)))
-
-(defn status-tags
-  [status]
-  '())
-
 (defn get-thread
   [db status-id]
   (vec
@@ -459,6 +450,14 @@
         (get-ids-by-thread-id db
           #(mapv :id %)
           (:thread_id (partial get-status db)))))))
+
+(defquery status-tags-query
+  [status-id] [:tag]
+  "select tag from status_tags where status_id = ?")
+
+(defn status-tags
+  [status-id]
+  (map :tag (status-tags-query status-id)))
     
 (defquery get-id-by-auth-token-query
   [auth-token] [:id]

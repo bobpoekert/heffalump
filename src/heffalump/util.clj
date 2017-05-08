@@ -1,5 +1,5 @@
 (ns heffalump.ostatus.util
-  (import [java.time Instant]))
+  (:import [java.time Instant]))
 
 (defn iso-string
   [epoch-int]

@@ -1,11 +1,10 @@
 (ns heffalump.db-test
-  (import IdList)
-  (require [clojure.test :refer :all]
+  (:import IdList)
+  (:require [clojure.test :refer :all]
            [clojure.test.check :as tc]
            [clojure.test.check.generators :as gen]
            [clojure.test.check.properties :as prop]
            [clojure.test.check.clojure-test :refer [defspec]]
-           clojure.data
            [heffalump.db :as d]
            [heffalump.db-utils :as du]))
 
@@ -26,19 +25,17 @@
   []
   (d/init! (test-config)))
 
-(defmacro with-test-db
-  [dbname & body]
-  `(let [~dbname @(new-test-db)]
-    (with-open [^java.sql.Connection dbc# (:connection ~dbname)]
-      ~@body)))
-
 (testing "db thread id sequence"
-  (with-test-db db
+  (let [db (new-test-db)]
     (is (= (d/new-thread-id! db) 0))
     (is (= (d/new-thread-id! db) 1))))
 
 (def column-generators {
   :text gen/string
+  :clob gen/string
+  "VARCHAR(200)" gen/string
+  "VARCHAR(64)" gen/string
+  :boolean gen/boolean
   :int gen/nat})
 
 (defn gens-from-table-specs
@@ -73,15 +70,16 @@
 (defspec insert-and-get-accounts
   10
   (prop/for-all [[account bad-password] (gen/tuple gen-login gen/string)]
-    (let [db global-test-db]
+    (let [db @global-test-db]
       (let [result (d/create-local-account! db account)
-            auth-token (:auth-token result)
-            refetch (du/get-by-id db :accounts (:id result))
+            auth-token (:auth_token result)
+            refetch (d/get-account db (:id result))
             by-auth-token (d/token-user db auth-token)] 
         (and
           (= (:username refetch) (:username account))
           (= (:username by-auth-token) (:username account))
-          (du/check-password (:password_hash refetch) (:password account))
+          (or (= (:password account) bad-password)
+            (du/check-password (:password_hash refetch) (:password account)))
           (or (= (:password account) bad-password)
               (not (du/check-password (:password_hash refetch) bad-password))))))))
 

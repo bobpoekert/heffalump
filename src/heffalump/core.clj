@@ -1,5 +1,5 @@
 (ns heffalump.core
-  (require
+  (:require
       [heffalump.config :as conf]
       [heffalump.app :as app]
       [heffalump.db :as db]))

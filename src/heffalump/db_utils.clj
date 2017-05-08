@@ -1,18 +1,23 @@
 (ns heffalump.db-utils
-  (import [com.google.common.cache CacheBuilder]
+  (:import [com.google.common.cache CacheBuilder]
           [javax.crypto SecretKey SecretKeyFactory]
           [javax.crypto.spec PBEKeySpec]
           [java.security SecureRandom KeyPairGenerator]
           [java.io ObjectInputStream ObjectOutputStream ByteArrayOutputStream]
           [org.mindrot.jbcrypt BCrypt]
+          [java.time Instant]
           ThreadLocalThing)
-  (require [clojure.string :as s]
+  (:require [clojure.string :as s]
            [clojure.java.io :as io]
            [clojure.java.jdbc :as jdbc]
            [clojure.data.fressian :as fress]
            [byte-streams :as bs]))
 
 (set! *warn-on-reflection* true)
+
+(defn now
+  []
+  (.getEpochSecond (Instant/now)))
 
 (defprotocol MaybeDeref
   (maybe-deref [v]))
@@ -101,18 +106,18 @@
 
 (defn b64encode
   ([ins] (b64encode ins :default))
-  ([mode ins]
+  ([ins mode]
     (let [encoder (case mode
                     :default (java.util.Base64/getEncoder)
                     :url (java.util.Base64/getUrlEncoder)
-                    :mime (java.util.Base84/getMimeEncoder))]
+                    :mime (java.util.Base64/getMimeEncoder))]
       (.encodeToString encoder (bs/to-byte-array ins)))))
 
 (defn rsa-keypair
   []
-  (let [gen (KeyPairGenerator/getInstance "RSA")]
+  (let [^KeyPairGenerator gen (KeyPairGenerator/getInstance "RSA")]
     (.initialize gen 2048)
-    (.getKeyPair gen)))
+    (.genKeyPair gen)))
 
 (defn serialize
   [o]
@@ -123,10 +128,11 @@
 
 (defn deserialize
   [blob]
-  (with-open [blob (bs/to-input-stream blob)
-              ois (ObjectInputStream. blob)]
-    (.readObject ois)))
-    
+  (if (nil? blob)
+    nil
+    (with-open [blob (bs/to-input-stream blob)
+                ois (ObjectInputStream. blob)]
+      (.readObject ois))))
 
 (defn create-cache
   []
@@ -159,16 +165,20 @@
       cache-value#
       (let [result# ~value-generator]
         (if-not (nil? result#)
-          (.put cache# cache-key# result#)
-        result#)))))
+          (.put cache# cache-key# result#))
+        result#))))
 
 (defn statement-set-params!
   [^java.sql.PreparedStatement stmt params]
+  (.clearParameters stmt)
   (if (seq params)
     (loop [[param & rst] params
            idx 1]
-      (.setObject stmt idx (jdbc/sql-value param))
-      (if rst
+      (let [param (jdbc/sql-value param)]
+        (if (nil? param)
+          (.setNull stmt idx (.getParameterType (.getParameterMetaData stmt) idx))
+          (.setObject stmt idx param)))
+      (if (seq rst)
         (recur rst (inc idx))))))
 
 (defn run-prepared-query
@@ -186,10 +196,11 @@
         type-constructor-sym (symbol (format "%s." typename))
         rs-sym (with-meta (gensym "rs") {:tag "java.sql.ResultSet"})
         row-reader (eval `(do
-                                  (defrecord ~(symbol typename) ~(mapv symbol col-names))
-                                  (fn [~rs-sym]
-                                    ~(cons type-constructor-sym
-                                      (for [idx (range (count col-names))] `(.getObject ~rs-sym ~(inc idx)))))))]
+                            (defrecord ~(symbol typename) ~(mapv symbol col-names))
+                            (fn [~rs-sym]
+                              (if ~rs-sym
+                                ~(cons type-constructor-sym
+                                  (for [idx (range (count col-names))] `(.getObject ~rs-sym ~(inc idx))))))))]
     {tablename [statement row-reader]}))
 
 (defn prepared-query-generator

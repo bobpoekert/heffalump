@@ -1,5 +1,5 @@
 (ns heffalump.app
-  (require
+  (:require
     [heffalump.db :as db]
     [clojure.string :as s] 
     [aleph.http :as http]
