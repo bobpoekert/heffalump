@@ -8,6 +8,7 @@
            [heffalump.db :as d]
            [heffalump.db-utils :as du]))
 
+(quote
 (defn test-config
   []
   {
@@ -19,8 +20,19 @@
       :create true}
     :init-db true
     :port 8000
+    :hostname "localhost"}))
+(defn test-config
+  []
+  {
+    :data-dir "."
+    :db {
+      :classname "org.apache.derby.jdbc.EmbeddedDriver"
+      :subprotocol "derby"
+      :subname "test.derby" 
+      :create true}
+    :init-db true
+    :port 8000
     :hostname "localhost"})
-
 (defn new-test-db
   []
   (d/init! (test-config)))
@@ -28,8 +40,8 @@
 (deftest thread-id-sequence
   (testing "db thread id sequence"
     (let [db (new-test-db)]
-      (is (= (d/new-thread-id! db) 0))
-      (is (= (d/new-thread-id! db) 1)))))
+      (is (= (inc @(d/new-thread-id! db))
+             @(d/new-thread-id! db))))))
 
 (defn bounded-string-gen
   [length]
@@ -68,9 +80,9 @@
 (defn test-id-roundtrip
   [db tablename]
   (prop/for-all [row (get table-gens tablename)]
-    (let [insert-result (du/insert-row! db tablename row)
+    (let [insert-result @(du/insert-row! db tablename row)
           id (:id insert-result)
-          test-fetch (du/get-by-id db tablename id)]
+          test-fetch @(du/get-by-id db tablename id)]
       (map= insert-result test-fetch))))
 
 (def global-test-db (new-test-db))
@@ -79,10 +91,10 @@
   10
   (prop/for-all [[account bad-password] (gen/tuple gen-login gen/string)]
     (let [db @global-test-db]
-      (let [result (d/create-local-account! db account)
+      (let [result @(d/create-local-account! db account)
             auth-token (:auth_token result)
-            refetch (d/get-account db (:id result))
-            by-auth-token (d/token-user db auth-token)] 
+            refetch @(d/get-account db (:id result))
+            by-auth-token @(d/token-user db auth-token)] 
         (and
           (= (:username refetch) (:username account))
           (= (:username by-auth-token) (:username account))

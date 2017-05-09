@@ -17,8 +17,7 @@
   [db config]
   {
     :db db
-    :config config
-    :db-executor (ex/fixed-thread-executor (or (:db-thread-count config) 1))})
+    :config config})
 
 (defn in-db
   [app-state thunk & fargs]
@@ -45,9 +44,9 @@
     (let [token (auth-token req)]
       (if-not token
         auth-fail
-        (d/let-flow [auth-user (in-db app-state db/token-user token)]
+        (d/let-flow [auth-user (db/token-user (:db app-state) token)]
           (if auth-user
-            (thunk app-state req auth-user)
+            (thunk req auth-user)
             auth-fail))))))
 
 (defn creates-status
@@ -58,12 +57,11 @@
       (let [account-id (:id auth-user)
             reply-id (:in_reply_to_id req)
             content (:content req)]
-        (d/let-flow [db-res (in-db app-state db/create-status! {
+        (d/let-flow [db-res (db/create-status! (:db app-state) {
                               :account_id account-id
                               :in_reply_to_id reply-id
                               :content content})]
-          
-  
+          {:id (:id db-res)})))))
 
 (defn create-routes
   [app-state]

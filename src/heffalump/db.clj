@@ -6,7 +6,8 @@
            [clojure.java.io :as io]
            [clojure.java.jdbc :as jdbc]
            [clojure.data.fressian :as fress]
-           [byte-streams :as bs]))
+           [byte-streams :as bs]
+           [manifold.deferred :as d]))
 
 (def id-column [:id "INTEGER NOT NULL PRIMARY KEY GENERATED ALWAYS AS IDENTITY (start with 1, increment by 1)"])
 
@@ -39,29 +40,29 @@
 
 (defn inflate-log-action
   [db row]
-  (case (nth verbs (:verb db))
-    :follow (FollowAction.
+  (case (nth verbs (:verb row))
+    :follow (d-apply ->FollowAction
               (get-by-id db :accounts (:source row))
               (get-by-id db :accounts (:target row)))
-    :request_friend (FriendRequestAction.
+    :request_friend (d-apply ->FriendRequestAction
                       (get-by-id :accounts (:source row))
                       (get-by-id :accounts (:target row)))
-    :authorize (let [follow-request (get-by-id db :follow_requests (:target row))]
-                (AuthorizeAction.
+    :authorize (d/let-flow [follow-request (get-by-id db :follow_requests (:target row))]
+                (d-apply ->AuthorizeAction
                   follow-request
                   (get-by-id db :accounts (:follower follow-request))
                   (get-by-id db :accounts (:followee follow-request))))
-    :reject (let [follow-request (get-by-id db :follow_requests (:target row))]
-              (RejectAction.
+    :reject (d/let-flow [follow-request (get-by-id db :follow_requests (:target row))]
+              (d-apply ->RejectAction
                 follow-request
                 (get-by-id db :accounts (:source follow-request))
                 (get-by-id db :accounts (:target follow-request))))
-    :unfollow (UnfollowAction.
+    :unfollow (d-apply ->UnfollowAction
                 (get-by-id db :accounts (:source row))
                 (get-by-id db :accounts (:target row)))
-    :share (ShareAction.
+    :share (d-apply ->ShareAction
             (get-status db (:target row)))
-    :favorite (FavAction.
+    :favorite (d-apply ->FavAction
                 (get-by-id db :accounts (:source row))
                 (get-status db (:target row)))))
 
@@ -157,14 +158,6 @@
         [:content_type "VARCHAR(64)"] ; mime type
         [:file_size :int]
       ]]
-    [:mentions
-      [
-        id-column
-        [:status_id :int]
-        [:sender_id :int]
-        [:recipient_id :int]
-        [:created_at :int]
-        [:deleted_at :int]]]
     [:accounts
       [
       id-column
@@ -183,6 +176,10 @@
       [:deleted_at :int]
       [:updated_at :int]
       ]]
+    [:account_aliases
+      [
+        [:account_id :int]
+        [:url :text]]]
     [:account_blocks
       [
         id-column
@@ -202,15 +199,14 @@
   [
     [:accounts :auth_token]
     [:accounts :username]
-    [:mentions :status_id]
-    [:mentions :recipient_id]
     [:media_attributes :status_id]
     [:statuses :thread_id]
     [:status_tags :status_id]
     [:account_blocks :blocker]
     [:account_mutes :muter]
     [:account_follows :follower]
-    [:account_follows :followee]])
+    [:account_follows :followee]
+    [:account_aliases :url]])
 
 (defn display-name
   [account]
@@ -243,11 +239,17 @@
   [status-id] [:url :preview_url :content_type :file_size]
   "select url, preview_url, content_type, file_size from media_attributes where status_id = ?")
 
+(defquery get-tags
+  [status-id] [:tag]
+  "select tag from status_tags where status_id = ?"
+  #(mapv :tag %))
+
 (defn follow!
   [db followee-id follower-id]
-  (insert-row! db :account_follows {:follower follower-id :followee followee-id})
-  (if-let [^TLongHashSet cache (get-cache db [:followers followee-id])]
-    (.add cache follower-id)))
+  (d/let-flow [res (insert-row! db :account_follows {:follower follower-id :followee followee-id})]
+    (if-let [^TLongHashSet cache (get-cache db [:followers followee-id])]
+      (.add cache follower-id))
+    res))
 
 (defquery unfollow-query!
   [followee-id follower-id] []
@@ -255,9 +257,10 @@
 
 (defn unfollow!
   [db followee-id follower-id]
-  (unfollow-query! db followee-id follower-id)
-  (if-let [^TLongHashSet cache (get-cache db [:followers followee-id])]
-    (.remove cache follower-id)))
+  (d/let-flow [res (unfollow-query! db followee-id follower-id)]
+    (if-let [^TLongHashSet cache (get-cache db [:followers followee-id])]
+      (.remove cache follower-id))
+    res))
 
 (defquery get-feed-query
   [account-id] [:id]
@@ -273,27 +276,30 @@
 
 (defn get-feed-statuses
   [db account-id]
-  (mapv (partial get-status db) (get-feed-ids db account-id)))
+  (d/let-flow [ids (get-feed-ids db account-id)]
+    (apply d/zip (map (partial get-status db) ids))))
 
 (defn update-feed!
   [db post-id follower-id]
-  (if-let [^IdList cached-feed (get-cache db [:account-feed follower-id])]
-    (.put cached-feed post-id)))
+  (d/let-flow [^IdList cached-feed (get-cache db [:account-feed follower-id])]
+    (if cached-feed
+      (.put cached-feed post-id))))
 
 (defn new-post-update-feeds!
   [db poster-id post-id]
-  (let [followers (get-followers db poster-id)]
+  (d/let-flow [followers (get-followers db poster-id)]
     (doseq [follower followers]
       (update-feed! db post-id follower))))
 
 (defquery get-dump-query
   [k entity] [:v]
-  "select v from dump where k = ? and entity = ?")
+  "select v from dump where k = ? and entity = ?"
+  (partial mapv :v))
 
 (defn get-dump
   ([db k] (get-dump db k nil))
   ([db k entity]
-    (let [result-string (:v (get-dump-query db k entity))]
+    (d/let-flow [result-string (get-dump-query db k entity)]
       (if result-string
         (fress/read (bs/convert result-string java.io.Reader))))))
 
@@ -317,10 +323,11 @@
 
 (defn block!
   [db blocker blockee]
-  (if-not (blocks? db blocker blockee)
-    (let [blocker (id-or-int blocker) blockee (id-or-int blockee)]
-      (insert-row! db :account_blocks {:blocker blocker :blockee blockee})
-      (put-cache! db [:blocks? blocker blockee] true))))
+  (d/let-flow [blocks (blocks? db blocker blockee)]
+    (if-not blocks
+      (let [blocker (id-or-int blocker) blockee (id-or-int blockee)]
+        (put-cache! db [:blocks? blocker blockee] true)
+        (insert-row! db :account_blocks {:blocker blocker :blockee blockee})))))
 
 (defquery unblock-query
   [blocker blockee] []
@@ -329,8 +336,8 @@
 (defn unblock!
   [db blocker blockee]
   (let [blocker (id-or-int blocker) blockee (id-or-int blockee)]
-    (unblock-query db blocker blockee)
-    (put-cache! db [:blocks? blocker blockee] false)))
+    (put-cache! db [:blocks? blocker blockee] false)
+    (unblock-query db blocker blockee)))
 
 (defn new-auth-token
   []
@@ -338,11 +345,11 @@
 
 (defn setup-db!
   [db]
-  (jdbc/with-db-transaction [txn db]
-    (create-tables! txn table-specs)
-    (create-indexes! txn indexes)
-    (jdbc/execute! txn "create sequence thread_id_sequence start with 0")
-    (jdbc/execute! txn "create sequence clock_sequence start with 0")))
+  (let [db (maybe-deref db)]
+    (create-tables! db table-specs)
+    (create-indexes! db indexes)
+    (jdbc/execute! db "create sequence thread_id_sequence start with 0")
+    (jdbc/execute! db "create sequence clock_sequence start with 0")))
 
 (defn init!
   [config]
@@ -398,17 +405,14 @@
 
 (defn create-status!
   [db status]
-  (jdbc/with-db-transaction [tc db]
-    (let [in_reply_to_id (:in_reply_to_id status)
-          account_id (:account_id status)
-          reply-target (if in_reply_to_id (get-by-id tc :statuses in_reply_to_id))
-          thread_id (if reply-target
-                      (:thread_id reply-target)
-                      (new-thread-id! tc))
-          thread_depth (if reply-target (inc (:thread_depth reply-target)) 0)
-          status
-            (insert-row! tc :statuses status)]
-      (new-post-update-feeds! db account_id (:id status)))))
+  (let [in_reply_to_id (:in_reply_to_id status)
+        account_id (:account_id status)]
+    (d/let-flow [reply-target (d-if in_reply_to_id (get-by-id db :statuses in_reply_to_id))
+                 thread_id (d-if (not reply-target) (new-thread-id! db))]
+      (let [thread_id (or thread_id (:thread_id reply-target))
+            thread_depth (if reply-target (inc (:thread_depth reply-target)) 0)]
+        (d/let-flow [status (insert-row! db :statuses status)]
+          (new-post-update-feeds! db account_id (:id status)))))))
 
 (defquery delete-status-query
   [delete-time status-id] []
@@ -423,19 +427,34 @@
 
 (defn get-account
   [db account-id]
-  (let [res (get-by-id db :accounts account-id)]
+  (d/let-flow [res (get-by-id db :accounts account-id)]
     (if res
       (assoc res :keypair (deserialize (:keypair res))))))
 
+(defquery get-account-by-url-query
+  [url] [:id]
+  "select account_id from account_aliases where url = ?"
+  #(mapv :id %))
+
+(defn get-accounts-by-url
+  [db url]
+  (d/let-flow [ids (get-account-by-url-query url)]
+    (apply d/zip
+      (map (partial get-account) ids))))
+
 (defn get-status
   [db status-id]
-  (let [res (get-by-id db :statuses status-id)]
+  (d/let-flow [res (get-by-id db :statuses status-id)]
     (if (or (= res :deleted) (:deleted_at res))
       nil
-      (->
-        res
-        (assoc :account (get-account db (:account_id res)))
-        (assoc :media (get-media-attrs db status-id))))))
+      (d/let-flow [account (get-account db (:account_id res))
+                   media (get-media-attrs db status-id)
+                   tags (get-tags db status-id)]
+        (->
+          res
+          (assoc :account account)
+          (assoc :tags tags)
+          (assoc :media media))))))
 
 (defquery get-ids-by-thread-id
   [thread-id] [:id]
@@ -443,21 +462,20 @@
 
 (defn get-thread
   [db status-id]
-  (vec
-    (filter #(not (= % :deleted))
-      (map
-        (partial get-status db)
-        (get-ids-by-thread-id db
-          #(mapv :id %)
-          (:thread_id (partial get-status db)))))))
+  (d/let-flow [ids (get-ids-by-thread-id db
+                    #(mapv :id %)
+                    (:thread_id (partial get-status db)))]
+    (->>
+      ids
+      (map (partial get-status db))
+      (apply d/zip)
+      (filter #(not (= % :deleted)))
+      (vec))))
 
-(defquery status-tags-query
+(defquery status-tags
   [status-id] [:tag]
-  "select tag from status_tags where status_id = ?")
-
-(defn status-tags
-  [status-id]
-  (map :tag (status-tags-query status-id)))
+  "select tag from status_tags where status_id = ?"
+  #(mapv :tag %))
     
 (defquery get-id-by-auth-token-query
   [auth-token] [:id]
@@ -471,13 +489,16 @@
 
 (defn change-auth-token!
   [db account-id]
-  (let [new-token (new-auth-token)
-        old-token (:auth-token (get-by-id db :accounts account-id))]
-    (update-row! db :accounts {:id account-id :auth_token new-token})
-    (delete-cache! db [:auth-token-id old-token])))
+  (d/let-flow [old-row (get-by-id db :accounts account-id)]
+    (let [new-token (new-auth-token)
+          old-token (:auth-token old-row)]
+      (update-row! db :accounts {:id account-id :auth_token new-token})
+      (delete-cache! db [:auth-token-id old-token]))))
 
 (defn token-user
   [db auth-token]
-  (if-let [account-id (get-id-by-auth-token db auth-token)]
+  (d/let-flow [account-id (get-id-by-auth-token db auth-token)]
     ;; doing it this way so that both cache keys refer to the same object in memory
-    (get-by-id db :accounts account-id)))
+    (if account-id
+      (get-by-id db :accounts account-id)
+      d-nil)))

@@ -11,9 +11,28 @@
            [clojure.java.io :as io]
            [clojure.java.jdbc :as jdbc]
            [clojure.data.fressian :as fress]
-           [byte-streams :as bs]))
+           [byte-streams :as bs]
+           [manifold.deferred :as d]
+           [manifold.executor :as ex]))
 
 (set! *warn-on-reflection* true)
+
+(defn d-value
+  [v]
+  (let [res (d/deferred)]
+    (d/success! res v)
+    res))
+
+(def d-nil (d-value nil))
+
+(defmacro d-if
+  [c df]
+  `(if ~c ~df d-nil))
+
+(defn d-apply
+  [thunk & args]
+  (d/let-flow [res (apply d/zip args)]
+    (apply thunk res)))
 
 (defn all?
   [s]
@@ -36,6 +55,10 @@
   (maybe-deref [v] (deref v))
   Object
   (maybe-deref [v] v))
+
+(defmacro in-db
+  [db & body]
+  `(d/onto (d/future ~@body) (:executor (maybe-deref ~db))))
 
 (def db-create-actions (atom []))
 
@@ -192,9 +215,10 @@
 
 (defn run-prepared-query
   [db ^java.sql.PreparedStatement stmt args result-set-fn]
-  (statement-set-params! stmt args)
-  (with-open [results (.executeQuery stmt)]
-    (result-set-fn results))) 
+  (in-db db
+    (statement-set-params! stmt args)
+    (with-open [results (.executeQuery stmt)]
+      (result-set-fn results))))
 
 (defn generate-by-id-query
   [db tablename col-specs]
@@ -246,9 +270,10 @@
         (let [result-set-unpacker# ~(gen-result-set-unpacker return-keys record-name)] 
           (defn ~query-name
             (~(vec (concat [db-sym result-fn-sym] args))
-              (let [db# (maybe-deref ~db-sym)
-                    q# (get db# ~name-kw)]
-                (run-prepared-query db# q# ~args (result-set-unpacker# ~result-fn-sym))))
+              (in-db ~db-sym
+                (let [db# (maybe-deref ~db-sym)
+                      q# (get db# ~name-kw)]
+                  (run-prepared-query db# q# ~args (result-set-unpacker# ~result-fn-sym)))))
             (~(vec (concat [db-sym] args))
               ~(concat (list query-name db-sym result-fn) args))))))))
 
@@ -304,16 +329,17 @@
 
 (defn insert-row!
   [db tablename row]
-  (let [db (maybe-deref db)
-        [^java.sql.PreparedStatement query has-id-col? cols] (get (:insert-queries db) tablename)]
-    (populate-statement! db query cols row)
-    (.executeUpdate query)
-    (.commit ^java.sql.Connection (:connection db))
-    (if has-id-col?
-      (let [id (long (last-row-id db))]
-        (delete-cache! db [:by-id-results tablename id])
-        (assoc row :id id))
-      row)))
+  (in-db db
+    (let [db (maybe-deref db)
+          [^java.sql.PreparedStatement query has-id-col? cols] (get (:insert-queries db) tablename)]
+      (populate-statement! db query cols row)
+      (.executeUpdate query)
+      (.commit ^java.sql.Connection (:connection db))
+      (if has-id-col?
+        (d/let-flow [id (last-row-id db)]
+          (delete-cache! db [:by-id-results tablename id])
+          (assoc row :id id))
+        row))))
                 
 (defn get-by-id
   [db table id]
@@ -328,13 +354,14 @@
 
 (defn update-row!
   [db table-name row]
-  (let [db (maybe-deref db)
-        id (:id row)
-        where-clause ["id = ?" id]
-        res (jdbc/update! db table-name row where-clause)]
-    (delete-cache! db [:by-id-result table-name id])
-    (.commit ^java.sql.Connection (:connection db))
-    res))
+  (in-db db
+    (let [db (maybe-deref db)
+          id (:id row)
+          where-clause ["id = ?" id]
+          res (jdbc/update! db table-name row where-clause)]
+      (delete-cache! db [:by-id-result table-name id])
+      (.commit ^java.sql.Connection (:connection db))
+      res)))
 
 (defn populate-queries
   [db tables]
@@ -352,7 +379,8 @@
 (defn create-db
   [config]
   (let [conn (jdbc/get-connection (:db config))]
-    {:connection conn}))
+    {:connection conn
+     :executor (ex/fixed-thread-executor (or (:db-thread-count config) 1))}))
 
 (defprotocol IdOrInt
   (id-or-int [v]))
