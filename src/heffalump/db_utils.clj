@@ -15,6 +15,15 @@
 
 (set! *warn-on-reflection* true)
 
+(defn all?
+  [s]
+  (loop [[h & t] s]
+    (if h
+      (if t
+        (recur t)
+        true)
+      false)))
+
 (defn now
   []
   (.getEpochSecond (Instant/now)))

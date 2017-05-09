@@ -25,16 +25,22 @@
   []
   (d/init! (test-config)))
 
-(testing "db thread id sequence"
-  (let [db (new-test-db)]
-    (is (= (d/new-thread-id! db) 0))
-    (is (= (d/new-thread-id! db) 1))))
+(deftest thread-id-sequence
+  (testing "db thread id sequence"
+    (let [db (new-test-db)]
+      (is (= (d/new-thread-id! db) 0))
+      (is (= (d/new-thread-id! db) 1)))))
+
+(defn bounded-string-gen
+  [length]
+  (gen/fmap #(apply str %) 
+            (gen/vector gen/char-alpha length)))
 
 (def column-generators {
-  :text gen/string
+  :text (bounded-string-gen 4096)
   :clob gen/string
-  "VARCHAR(200)" gen/string
-  "VARCHAR(64)" gen/string
+  "VARCHAR(200)" (bounded-string-gen 200)
+  "VARCHAR(64)" (bounded-string-gen 64)
   :boolean gen/boolean
   :int gen/nat})
 
@@ -53,17 +59,19 @@
     :username gen/string
     :password gen/string))
 
+(defn map=
+  [a b]
+  (du/all?
+    (for [[k v] a]
+      (= v (get b k)))))
+
 (defn test-id-roundtrip
   [db tablename]
   (prop/for-all [row (get table-gens tablename)]
     (let [insert-result (du/insert-row! db tablename row)
           id (:id insert-result)
           test-fetch (du/get-by-id db tablename id)]
-      (if (= insert-result test-fetch)
-        true
-        (do
-          (prn [insert-result id test-fetch])
-          false)))))
+      (map= insert-result test-fetch))))
 
 (def global-test-db (new-test-db))
 
@@ -83,19 +91,14 @@
           (or (= (:password account) bad-password)
               (not (du/check-password (:password_hash refetch) bad-password))))))))
 
-(quote (
-(defspec test-media-attr-roundtrip
-  100
-  (test-id-roundtrip global-test-db :media_attributes))
-
-(defspec test-blocks-roundtrip
-  100
-  (test-id-roundtrip global-test-db :account_blocks))
-
-(defspec test-mutes-roundtrip
-  100
-  (test-id-roundtrip global-test-db :account_mutes))
-))
+(quote
+(deftest tables-roundtrip
+  (testing "tables roundtrip"
+    (doseq [[table & _] d/table-specs]
+      (prn table)
+      (is
+        (tc/quick-check 10
+          (test-id-roundtrip global-test-db table)))))))
 
 (defspec test-id-list-construct
   10000

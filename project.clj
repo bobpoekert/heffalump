@@ -3,6 +3,7 @@
   :license {:name "MIT License"
             :url "https://github.com/bobpoekert/heffalump/blob/master/LICENSE"}
   :java-source-paths ["src/java"]
+  :jvm-opts ["-Xmx512m"]
   :repositories [["jitpack" "https://jitpack.io"]]
   :dependencies [
     [org.clojure/clojure "1.9.0-alpha15"]
