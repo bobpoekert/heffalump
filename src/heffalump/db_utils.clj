@@ -29,6 +29,25 @@
   [c df]
   `(if ~c ~df d-nil))
 
+(defn d-cond?*
+  [conditions]
+  (if (seq conditions)
+    (let [[[pred payload] & t] conditions]
+      (if (= pred :else)
+        payload
+        `(if ~pred
+          (d/let-flow [res# ~payload]
+            (if (not (nil? res#))
+              res#
+              ~(d-cond?* t)))
+          ~(d-cond?* t))))
+   nil))
+
+(defmacro d-cond?
+  [& conditions]
+  (let [conditions (partition 2 conditions)]
+    (d-cond?* conditions))) 
+
 (defn d-apply
   [thunk & args]
   (d/let-flow [res (apply d/zip args)]

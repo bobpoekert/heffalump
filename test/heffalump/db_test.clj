@@ -21,6 +21,7 @@
     :init-db true
     :port 8000
     :hostname "localhost"}))
+
 (defn test-config
   []
   {
@@ -28,7 +29,7 @@
     :db {
       :classname "org.apache.derby.jdbc.EmbeddedDriver"
       :subprotocol "derby"
-      :subname "test.derby" 
+      :subname "test2.derby" 
       :create true}
     :init-db true
     :port 8000

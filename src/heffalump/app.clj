@@ -109,4 +109,8 @@
 
 (defn run!
   [db config]
-  (http/start-server (create-app db config) {:port (:port config)}))
+  (http/start-server
+    (create-app db config)
+    {:port (:port config)
+     :executor :none
+     :compression? true}))

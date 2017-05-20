@@ -14,7 +14,7 @@
     [org.clojure/data.xml "0.0.8"]
     [image-resizer "0.1.9"]
     [compojure "1.5.2"]
-    [org.clojure/java.jdbc "0.7.0-alpha3"]
+    [org.clojure/java.jdbc "0.7.0-alpha2"]
     [org.apache.derby/derby "10.13.1.1"]
     [com.google.guava/guava "21.0"]
     [net.sf.trove4j/trove4j "3.0.3"]
